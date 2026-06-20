@@ -62,7 +62,6 @@ const forward = (targetURL, prefix) => async (req, res) => {
 // Routes
 app.use('/auth', forward(process.env.USER_SERVICE_URL, '/auth'));
 app.use('/chat', forward(process.env.CHAT_SERVICE_URL, '/chat'));
-app.use('/moderate', forward(process.env.MODERATION_SERVICE_URL, '/moderate'));
 app.use('/analytics', forward(process.env.ANALYTICS_SERVICE_URL, '/analytics'));
 
 // Health check
