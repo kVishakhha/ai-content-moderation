@@ -1,7 +1,5 @@
 const pool = require('../config/db');
-const { mockModerate } = require('../config/mockModeration');
-
-// const axios = require('axios'); // <-- uncomment when swapping to real moderation
+const axios = require('axios');
 
 // We grab the live Socket.IO instance + the online-user map from index.js.
 // (set in index.js via app.set(...) — see that file.)
@@ -17,16 +15,33 @@ function getOnlineUsers(req) {
 // RIGHT NOW: uses the mock. LATER: swap to the axios block.
 // ============================================================
 async function moderate(text) {
-  // ---- MOCK (current) ----
-  return mockModerate(text);
+  try {
+    const res = await axios.post(
+      `${process.env.MODERATION_SERVICE_URL}/moderate`,
+      { text }
+    );
 
+    return {
+      score: res.data.score,
+      decision: res.data.decision,
+    };
+  } catch (error) {
+    console.error('Moderation service error:', error.message);
+
+    // fail-safe
+    return {
+      score: 0,
+      decision: 'allow',
+    };
+  }
+}
   // ---- REAL (swap to this later) ----
   // const res = await axios.post(
   //   `${process.env.MODERATION_SERVICE_URL}/moderate`,
   //   { text }
   // );
   // return res.data; // { score, decision }
-}
+
 
 // POST /chat/send   body: { receiver_id, content }
 async function sendMessage(req, res) {
