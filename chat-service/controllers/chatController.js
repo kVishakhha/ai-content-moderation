@@ -35,13 +35,6 @@ async function moderate(text) {
     };
   }
 }
-  // ---- REAL (swap to this later) ----
-  // const res = await axios.post(
-  //   `${process.env.MODERATION_SERVICE_URL}/moderate`,
-  //   { text }
-  // );
-  // return res.data; // { score, decision }
-
 
 // POST /chat/send   body: { receiver_id, content }
 async function sendMessage(req, res) {

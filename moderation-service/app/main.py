@@ -17,7 +17,11 @@ def health():
 
 @app.post("/moderate", response_model=ModerationResponse)
 def moderate(req: ModerationRequest):
-    score = score_text(req.text)
-    decision = decide(score)
+    categories = score_text(req.text)
+    score, decision = decide(categories)
     log.info("moderate len=%d score=%.2f decision=%s", len(req.text), score, decision)
-    return ModerationResponse(score=round(score, 4), decision=decision)
+    return ModerationResponse(
+        score=round(score, 4),
+        decision=decision,
+        categories={k: round(v, 4) for k, v in categories.items()},
+    )
