@@ -12,6 +12,8 @@
 
 from typing import Dict
 
+from .obfuscation import deobfuscate, scan as scan_obfuscation
+
 # Fallback keyword lists (used only when the ML model is unavailable).
 _BLOCK = ["nude", "kill", "hate", "idiot", "stupid", "bitch"]
 _WARN = ["dumb", "ugly", "shut up", "loser", "trash"]
@@ -58,7 +60,7 @@ def _keyword_score(text: str) -> Dict[str, float]:
     return {c: 0.05 for c in _CATEGORIES}
 
 
-def score_text(text: str) -> Dict[str, float]:
+def _model_or_keyword(text: str) -> Dict[str, float]:
     if _model_ok:
         try:
             scores = _model.predict(text)
@@ -67,3 +69,29 @@ def score_text(text: str) -> Dict[str, float]:
             # Model loaded but prediction failed — degrade gracefully.
             pass
     return _keyword_score(text)
+
+
+def score_text(text: str) -> Dict[str, float]:
+    # 1) Score the message as written.
+    cats = _model_or_keyword(text)
+
+    # 2) Give the model a second look at a de-obfuscated copy ("F@ck y0u" ->
+    #    "fack you"), then keep the worst score per category. This recovers
+    #    leet-style disguises the model can read once normalised.
+    deob = deobfuscate(text)
+    if deob != text.lower():
+        deob_cats = _model_or_keyword(deob)
+        cats = {c: max(cats[c], deob_cats[c]) for c in _CATEGORIES}
+
+    # 3) Explicit nets for disguises the model still can't read ("k*ll u",
+    #    "bxtch"). Raise the relevant category so decision_engine reacts:
+    #    a detected threat is forced above the block threshold; disguised
+    #    profanity is forced above the obscene warn threshold.
+    flags = scan_obfuscation(text)
+    if flags["threat"]:
+        cats["threat"] = max(cats["threat"], 0.95)
+    if flags["profanity"]:
+        cats["obscene"] = max(cats["obscene"], 0.60)
+        cats["toxicity"] = max(cats["toxicity"], 0.90)
+
+    return cats
