@@ -26,6 +26,11 @@ export default function Chat() {
   // NEW: theme + profile
   const [theme, setTheme] = useState('dark');     // 'dark' | 'light'
   const [showProfile, setShowProfile] = useState(false);
+  const [revealed, setRevealed] = useState({});   // { [messageId]: true } — warned msgs the recipient chose to view
+
+  function revealMessage(id) {
+    setRevealed((prev) => ({ ...prev, [id]: true }));
+  }
 
   const socketRef = useRef(null);
   const bottomRef = useRef(null);
@@ -43,12 +48,19 @@ export default function Chat() {
     socket.on('presence', (ids) => setOnlineIds(ids.map(String)));
 
     socket.on('new_message', (msg) => {
+      // Ignore our OWN messages coming back over the socket —
+      // we already added them locally when we sent them.
+      if (String(msg.sender_id) === String(userId)) {
+        loadConversations();
+        return;
+      }
       setActiveUser((current) => {
-        const other = String(msg.sender_id) === String(userId)
-          ? String(msg.receiver_id)
-          : String(msg.sender_id);
+        const other = String(msg.sender_id);
         if (current && String(current.id) === other) {
-          setMessages((prev) => [...prev, msg]);
+          // Dedupe: only add if this message id isn't already shown.
+          setMessages((prev) =>
+            prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]
+          );
         }
         return current;
       });
@@ -216,17 +228,29 @@ export default function Chat() {
               {messages.length === 0 && <div style={S.emptyChat}>No messages yet. Say hi 👋</div>}
               {messages.map((m) => {
                 const mine = String(m.sender_id) === String(userId);
+                // A warned message is hidden from the RECIPIENT until they choose
+                // to view it. The sender always sees their own message.
+                const gated = m.decision === 'warn' && !mine && !revealed[m.id];
+
                 return (
                   <div key={m.id} className="msg-in"
                        style={{ ...S.row, justifyContent: mine ? 'flex-end' : 'flex-start' }}>
-                    <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs) }}>
-                      <div>{m.content}</div>
-                      <div style={S.bubbleMeta}>
-                        <span>{timeOf(m.created_at)}</span>
-                        {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
-                        {m.decision === 'block' && mine && <span style={S.blockTag}>🚫 blocked</span>}
+                    {gated ? (
+                      <div style={{ ...S.bubble, ...S.warnGate }}>
+                        <div style={S.warnGateTitle}>⚠ This message was flagged as potentially harmful.</div>
+                        <button style={S.showBtn} onClick={() => revealMessage(m.id)}>Show message</button>
+                        <div style={S.warnGateTime}>{timeOf(m.created_at)}</div>
                       </div>
-                    </div>
+                    ) : (
+                      <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs) }}>
+                        <div>{m.content}</div>
+                        <div style={S.bubbleMeta}>
+                          <span>{timeOf(m.created_at)}</span>
+                          {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
+                          {m.decision === 'block' && mine && <span style={S.blockTag}>🚫 blocked</span>}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -281,6 +305,7 @@ function makeStyles(theme) {
     mine: '#7C5CBF', theirs: '#FFFFFF', avatarBg: '#D8CCEC', modalBg: '#FFFFFF',
   };
   const C = theme === 'dark' ? dark : light;
+  const WARN = '#C05600'; // amber for warning gate
 
   return {
     app: { display: 'flex', height: '100vh', width: '100vw', position: 'fixed', top: 0, left: 0,
@@ -342,6 +367,12 @@ function makeStyles(theme) {
     bubbleTheirs: { background: C.theirs, color: C.text, borderBottomLeftRadius: 4,
       border: theme === 'light' ? `1px solid ${C.border}` : 'none' },
     bubbleMeta: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4, fontSize: 10, opacity: 0.7 },
+    warnGate: { background: C.theirs, border: `1px dashed ${WARN}`, display: 'flex',
+      flexDirection: 'column', gap: 8, alignItems: 'flex-start' },
+    warnGateTitle: { fontSize: 12.5, color: theme === 'dark' ? '#fbbf24' : WARN, fontWeight: 500 },
+    showBtn: { fontSize: 12, fontWeight: 600, color: '#fff', background: WARN, border: 'none',
+      borderRadius: 8, padding: '5px 12px', cursor: 'pointer' },
+    warnGateTime: { fontSize: 10, opacity: 0.6 },
     warnTag: { color: '#fbbf24' },
     blockTag: { color: '#f87171' },
 
