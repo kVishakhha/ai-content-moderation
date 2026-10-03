@@ -1,0 +1,10 @@
+# Phase 2 training/evaluation dependencies (in addition to the service's
+# requirements.txt). Install with:
+#   pip install -r training/requirements-train.txt
+datasets
+scikit-learn
+pandas
+accelerate
+joblib
+transformers
+torch

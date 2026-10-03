@@ -1,0 +1,17 @@
+# Environment variables - never commit real secrets
+.env
+
+# Node modules - these are huge and can be reinstalled anytime
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
