@@ -7,7 +7,7 @@ require('dotenv').config();
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '15mb' }));
 
 // JWT verification middleware
 const verifyToken = (req, res, next) => {
@@ -67,6 +67,17 @@ app.use('/analytics', forward(process.env.ANALYTICS_SERVICE_URL, '/analytics'));
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'API Gateway is running' });
+});
+
+// Return bounded, machine-readable errors for body-parser failures.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body is too large' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && Object.prototype.hasOwnProperty.call(err, 'body')) {
+    return res.status(400).json({ error: 'Request body must be valid JSON' });
+  }
+  return next(err);
 });
 
 const PORT = process.env.GATEWAY_PORT || 3000;

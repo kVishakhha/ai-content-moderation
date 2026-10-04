@@ -1,6 +1,18 @@
 const pool = require('../config/db');
-const { mockModerate } = require('../config/mockModeration');
 const axios = require('axios');
+
+const MODERATION_TIMEOUT_MS = Number(process.env.MODERATION_TIMEOUT_MS) > 0
+  ? Number(process.env.MODERATION_TIMEOUT_MS)
+  : 30000;
+const VALID_DECISIONS = new Set(['allow', 'warn', 'block']);
+const DECISION_RANK = { allow: 0, warn: 1, block: 2 };
+
+class ModerationError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
 
 function getIO(req) {
   return req.app.get('io');
@@ -9,53 +21,85 @@ function getOnlineUsers(req) {
   return req.app.get('onlineUsers');
 }
 
-// ============================================================
-// Moderation call with:
-//   1. a TIMEOUT so a slow/down moderation service never freezes chat
-//   2. a FAIL-SAFE fallback decision if moderation is unavailable
-//   3. LATENCY measurement (ms) returned alongside the result
-//
-// Fail policy: if moderation is unreachable we FAIL SAFE by treating
-// the message as "warn" (delivered but flagged) rather than silently
-// allowing it. This is a deliberate, defensible choice — discuss it
-// in the report: fail-open (allow) vs fail-closed (block) vs this
-// middle ground (deliver-but-flag).
-// ============================================================
-const MODERATION_TIMEOUT_MS = 800; // tune as needed
+function validScore(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+}
 
-async function moderate(text) {
-  const start = Date.now();
+function validPart(result) {
+  return result && typeof result === 'object' &&
+    VALID_DECISIONS.has(result.decision) && validScore(result.score);
+}
 
+function validateModerationResponse(data, expectsText, expectsImage) {
+  if (!validPart(data)) return false;
+  const parts = [];
+  if (expectsText) {
+    if (!validPart(data.text)) return false;
+    parts.push(data.text);
+  }
+  if (expectsImage) {
+    const image = data.image;
+    const categories = image && image.categories;
+    const weapons = categories && categories.weapons;
+    if (!validPart(image) || !categories ||
+        !validScore(categories.normal) || !validScore(categories.nsfw) ||
+        !weapons || typeof weapons.detected !== 'boolean' || !Array.isArray(weapons.detections)) {
+      return false;
+    }
+    if (!weapons.detections.every((detection) => detection &&
+        typeof detection.label === 'string' && validScore(detection.confidence))) return false;
+    parts.push(image);
+  }
+  if (parts.length === 0) return false;
+  const expectedDecision = parts.reduce((highest, part) =>
+    DECISION_RANK[part.decision] > DECISION_RANK[highest] ? part.decision : highest,
+  'allow');
+  const expectedScore = Math.max(...parts.map((part) => part.score));
+  return data.decision === expectedDecision && Math.abs(data.score - expectedScore) <= 0.0001;
+}
+
+async function moderate(content, imageBase64, mimeType) {
+  const serviceUrl = process.env.MODERATION_SERVICE_URL;
+  if (typeof serviceUrl !== 'string' || !serviceUrl.trim()) {
+    throw new ModerationError(503, 'Moderation service is not configured');
+  }
+
+  const payload = {};
+  const expectsText = typeof content === 'string' && content.length > 0;
+  const expectsImage = typeof imageBase64 === 'string' && imageBase64.length > 0;
+  if (expectsText) payload.text = content;
+  if (expectsImage) {
+    payload.image_base64 = imageBase64;
+    payload.mime_type = mimeType;
+  }
+
+  const startedAt = Date.now();
   try {
-    // ---- REAL model (Meetali's service on port 3003) ----
-    const res = await axios.post(
-      `${process.env.MODERATION_SERVICE_URL}/moderate`,
-      { text },
+    const response = await axios.post(
+      `${serviceUrl.replace(/\/+$/, '')}/moderate-content`,
+      payload,
       { timeout: MODERATION_TIMEOUT_MS }
     );
-    const latencyMs = Date.now() - start;
-    return {
-      score: res.data.score,
-      decision: res.data.decision,
-      latencyMs,
-      moderated: true,        // real model answered
-      fallback: false,
-    };
+    if (!validateModerationResponse(response.data, expectsText, expectsImage)) {
+      throw new ModerationError(503, 'Moderation service returned an invalid response');
+    }
+    return { result: response.data, latencyMs: Date.now() - startedAt };
   } catch (err) {
-    const latencyMs = Date.now() - start;
-    // Timeout, connection refused, or any moderation failure lands here.
-    const reason = err.code === 'ECONNABORTED' ? 'timeout' : (err.code || 'error');
-    console.warn(`moderation unavailable (${reason}) after ${latencyMs}ms — failing safe to 'warn'`);
-
-    // FAIL SAFE: deliver but flag, so nothing is silently let through,
-    // and a human can review it via the queue.
-    return {
-      score: null,
-      decision: 'warn',
-      latencyMs,
-      moderated: false,       // real model did NOT answer
-      fallback: true,
-    };
+    if (err instanceof ModerationError) throw err;
+    if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+      throw new ModerationError(504, 'Moderation service timed out');
+    }
+    if (err.response) {
+      const status = err.response.status;
+      if (status === 400 || status === 413 || status === 415 || status === 422) {
+        const mappedStatus = status === 422 ? 400 : status;
+        const message = status === 415 ? 'Unsupported image format' :
+          status === 413 ? 'Image is too large' : 'Invalid moderation input';
+        throw new ModerationError(mappedStatus, message);
+      }
+      throw new ModerationError(503, 'Moderation service is unavailable');
+    }
+    throw new ModerationError(503, 'Moderation service is unavailable');
   }
 }
 
@@ -63,36 +107,87 @@ async function moderate(text) {
 async function sendMessage(req, res) {
   try {
     const senderId = req.headers['x-user-id'];
-    const { receiver_id, content } = req.body;
+    const { receiver_id: receiverId, content, image_base64: imageBase64, mime_type: mimeType } = req.body || {};
+    const hasText = typeof content === 'string' && content.trim().length > 0;
+    const hasImage = typeof imageBase64 === 'string' && imageBase64.length > 0;
 
     if (!senderId) return res.status(401).json({ error: 'No user id from gateway' });
-    if (!receiver_id || !content) {
-      return res.status(400).json({ error: 'receiver_id and content are required' });
+    if (!receiverId) return res.status(400).json({ error: 'receiver_id is required' });
+    if (content !== undefined && content !== null && typeof content !== 'string') {
+      return res.status(400).json({ error: 'content must be a string' });
+    }
+    if (imageBase64 !== undefined && imageBase64 !== null && typeof imageBase64 !== 'string') {
+      return res.status(400).json({ error: 'image_base64 must be a base64 string' });
+    }
+    if ((imageBase64 !== undefined || mimeType !== undefined) && (!hasImage || typeof mimeType !== 'string' || !mimeType)) {
+      return res.status(400).json({ error: 'image_base64 and mime_type must be provided together' });
+    }
+    if (!hasText && !hasImage) {
+      return res.status(400).json({ error: 'content or image_base64 is required' });
     }
 
-    // moderate (with timeout + fallback + latency)
-    const { score, decision, latencyMs, moderated, fallback } = await moderate(content);
+    let moderation;
+    let latencyMs;
+    try {
+      const result = await moderate(hasText ? content : null, hasImage ? imageBase64 : null, mimeType);
+      moderation = result.result;
+      latencyMs = result.latencyMs;
+    } catch (err) {
+      if (err instanceof ModerationError) {
+        console.warn(`moderation failed (${err.statusCode}): ${err.message}`);
+        return res.status(err.statusCode).json({ error: err.message, moderated: false, delivered: false });
+      }
+      throw err;
+    }
 
-    // Log the latency so we have real numbers for the report.
-    console.log(
-      `[latency] moderation=${latencyMs}ms decision=${decision} ` +
-      `moderated=${moderated}${fallback ? ' (FALLBACK)' : ''}`
-    );
+    const { score, decision } = moderation;
+    console.log(`[latency] moderation=${latencyMs}ms decision=${decision}`);
+
+    // The current message table and socket contract store/display text only.
+    // Never claim an image was saved or delivered until image storage is supported.
+    if (hasImage) {
+      if (decision === 'block') {
+        const auditContent = hasText ? content : '[blocked image message]';
+        const audit = await pool.query(
+          `INSERT INTO messages (sender_id, receiver_id, content, decision, confidence_score)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING *`,
+          [senderId, receiverId, auditContent, decision, score]
+        );
+        return res.status(201).json({
+          message: audit.rows[0],
+          decision,
+          score,
+          delivered: false,
+          latencyMs,
+          moderation,
+          blocked: true,
+        });
+      }
+      return res.status(501).json({
+        error: 'Image moderation completed, but image message storage and delivery are not implemented',
+        decision,
+        score,
+        delivered: false,
+        latencyMs,
+        moderation,
+      });
+    }
 
     const result = await pool.query(
       `INSERT INTO messages (sender_id, receiver_id, content, decision, confidence_score)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [senderId, receiver_id, content, decision, score]
+      [senderId, receiverId, content, decision, score]
     );
     const saved = result.rows[0];
 
-    // real-time push if not blocked
+    // Warn remains stored and delivered as flagged; block remains auditable but is not pushed.
     if (decision !== 'block') {
       const io = getIO(req);
       const online = getOnlineUsers(req);
       if (io && online) {
-        const receiverSocket = online.get(String(receiver_id));
+        const receiverSocket = online.get(String(receiverId));
         if (receiverSocket) io.to(receiverSocket).emit('new_message', saved);
       }
     }
@@ -102,8 +197,10 @@ async function sendMessage(req, res) {
       decision,
       score,
       delivered: decision !== 'block',
-      latencyMs,        // sent back so the UI/report can use it
-      fallback,         // true if moderation was unavailable
+      latencyMs,
+      moderated: true,
+      fallback: false,
+      moderation,
     });
   } catch (err) {
     console.error('sendMessage error:', err);

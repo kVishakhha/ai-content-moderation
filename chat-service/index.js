@@ -9,7 +9,7 @@ const chatRoutes = require('./routes/chat');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '15mb' }));
 
 // ----- HTTP server + Socket.IO on the same port (3002) -----
 const server = http.createServer(app);
@@ -55,6 +55,17 @@ io.on('connection', (socket) => {
 app.use('/chat', chatRoutes);
 app.get('/health', (req, res) => {
   res.json({ status: 'Chat Service is running' });
+});
+
+// Return bounded, machine-readable errors for body-parser failures.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body is too large' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && Object.prototype.hasOwnProperty.call(err, 'body')) {
+    return res.status(400).json({ error: 'Request body must be valid JSON' });
+  }
+  return next(err);
 });
 
 const PORT = process.env.CHAT_SERVICE_PORT || 3002;

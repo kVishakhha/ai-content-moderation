@@ -5,6 +5,8 @@ import logging
 from typing import Dict
 
 from PIL import Image, UnidentifiedImageError
+from .weapon_moderator import WeaponModelError, moderate_weapons
+from .combined_image_decision_engine import decide_combined_image
 
 log = logging.getLogger("moderation.image")
 MODEL_ID = "Falconsai/nsfw_image_detection"
@@ -60,8 +62,8 @@ def _decode_image(image_bytes: bytes) -> Image.Image:
 def moderate_image_bytes(image_bytes: bytes) -> Dict[str, object]:
     """Validate and classify bytes; fail closed by raising on any failure.
 
-    The model is pretrained and only classifies `normal` versus `nsfw`; it does
-    not detect violence, gore, weapons, or self-harm imagery.
+    NSFW and weapons are evaluated independently; the NSFW classifier does not
+    detect weapons.
     """
     image = _decode_image(image_bytes)
     try:
@@ -69,15 +71,21 @@ def moderate_image_bytes(image_bytes: bytes) -> Dict[str, object]:
         scores = {str(row["label"]).lower(): float(row["score"]) for row in output}
         if "nsfw" not in scores or "normal" not in scores:
             raise ValueError("Model output did not include normal and nsfw labels")
-        from .image_decision_engine import decide_image
-
         score = scores["nsfw"]
-        decision = decide_image(score)
+        weapons = moderate_weapons(image_bytes)
+        decision, combined_score = decide_combined_image(score, weapons)
         return {
-            "score": round(score, 4),
+            "score": round(combined_score, 4),
             "decision": decision,
-            "categories": {key: round(scores[key], 4) for key in ("normal", "nsfw")},
+            "categories": {"normal": round(scores["normal"], 4), "nsfw": round(score, 4), "weapons": {
+                "detected": weapons["detected"], "detections": [
+                    {"label": d["label"], "confidence": round(d["confidence"], 4)} for d in weapons["detections"]
+                ]
+            }},
         }
+    except WeaponModelError:
+        # Preserve the distinct configuration/inference error for the endpoint.
+        raise
     except Exception as exc:
         log.exception("Image moderation inference failed")
         raise ImageModelError("Image moderation inference failed") from exc

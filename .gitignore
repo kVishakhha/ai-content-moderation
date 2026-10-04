@@ -9,6 +9,11 @@ node_modules/
 __pycache__/
 *.pyc
 
+# Local image moderation training artifacts; do not commit model weights.
+moderation-service/models/weapons/*.pt
+moderation-service/runs/
+moderation-service/yolo11n.pt
+
 # Logs
 *.log
 

@@ -5,3 +5,5 @@ detoxify
 torch
 transformers
 Pillow
+ultralytics
+PyYAML

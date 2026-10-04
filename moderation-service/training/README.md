@@ -1,73 +1,55 @@
-# Phase 2 — Dataset, Baseline & DistilBERT Fine-tuning
+﻿# Weapon detector training
 
-This folder contains the machine-learning experiment behind the moderation
-service: a reproducible pipeline that builds a **baseline** toxicity classifier,
-fine-tunes **DistilBERT** on the same data, and reports a head-to-head
-comparison — the "numbers to beat" story for the report/viva.
+## Dataset and classes
 
-It is self-contained and does **not** change the running moderation service
-(which uses Detoxify). It produces metrics and saved models for the paper.
+The locally available dataset is `C:\\weapon_dataset`, sourced from Roboflow project `weapon_detection_final-rvhn1`, version 3 (CC BY 4.0). It is external to this repository and must not be fabricated or silently replaced. Its `data.yaml` defines train, valid, and test image paths and class names in this exact order:
 
-## What it does
-
-| Stage | Script | Output |
-|---|---|---|
-| 1. Data | `prepare_data.py` | Samples + caches train/val/test to `data/*.parquet` |
-| 2. Baseline | `baseline.py` | TF-IDF + Logistic Regression → `artifacts/baseline_metrics.json` |
-| 3. DistilBERT | `train_distilbert.py` | Fine-tuned transformer → `artifacts/distilbert/` + metrics json |
-| 4. Compare | `compare.py` | `RESULTS.md` comparison tables |
-
-## Dataset
-
-`Arsive/toxicity_classification_jigsaw` — an auto-downloading HuggingFace Hub
-mirror of the **Jigsaw Toxic Comment Classification** dataset (no Kaggle login
-required). It carries the six canonical Jigsaw labels, which map onto the
-moderation service's categories:
-
-| Jigsaw label | Service category |
-|---|---|
-| toxic | toxicity |
-| severe_toxic | severe_toxicity |
-| obscene | obscene |
-| threat | threat |
-| insult | insult |
-| identity_hate | identity_attack |
-
-It is a **multi-label** problem (a comment can be several at once), so the
-models use a sigmoid-per-label head and we evaluate with per-label and
-micro/macro-averaged precision/recall/F1.
-
-### Sampling note
-Jigsaw is large (~185k rows) and heavily imbalanced toward clean text. To keep
-CPU training tractable we **stream** the dataset and draw a class-balanced
-sample (default 6k train / 1k val / 3k test). Jigsaw's test split marks unscored
-rows with `-1`; these are filtered out. Sizes are configurable via env vars
-(`TRAIN_SAMPLE`, `TEST_SAMPLE`, `EPOCHS`, …) — see `config.py`.
-
-## How to run
-
-```bash
-# from moderation-service/  (venv activated)
-pip install -r training/requirements-train.txt
-
-cd training
-python prepare_data.py        # ~minutes (downloads + samples dataset)
-python baseline.py            # ~seconds
-python train_distilbert.py    # the long one — CPU fine-tuning
-python compare.py             # prints + writes RESULTS.md
+```yaml
+names: [Grenade, Gun, Knife, Pistol]
 ```
 
-Scale the experiment up (better numbers, slower) with env vars, e.g.:
+The matching class IDs are 0=Grenade, 1=Gun, 2=Knife, and 3=Pistol. The dataset contains 4,197 train, 1,361 validation, and 1,265 test images. `prepare_dataset.py` verifies all splits, corresponding labels, class IDs, normalized box geometry, image decoding, and annotations. YOLO's scan reported zero corrupt images.
 
-```bash
-TRAIN_SAMPLE=15000 TEST_SAMPLE=5000 EPOCHS=3 python train_distilbert.py
+Each image has a same-stem `.txt` label file. Each object annotation line is:
+
+```text
+class_id x_center y_center width height
 ```
 
-## Outputs
-- `data/` — cached sampled splits (parquet)
-- `artifacts/baseline.joblib`, `artifacts/baseline_metrics.json`
-- `artifacts/distilbert/` — fine-tuned model + tokenizer
-- `artifacts/distilbert_metrics.json`
-- `RESULTS.md` — the comparison tables for the report
+The class ID is zero-based; coordinates are normalized to [0,1]. `data.yaml` must provide `train`, `val`, `test`, and `names`. Names and IDs must match the trained model and production loader exactly. Do not infer or add class labels beyond the dataset.
 
-`data/` and `artifacts/` are generated and should be git-ignored.
+## Install, train, evaluate
+
+From `moderation-service`:
+
+```powershell
+python -m pip install -r requirements.txt
+python training/prepare_dataset.py C:\\weapon_dataset\\data.yaml
+python training/train_weapon_detector.py --data C:\\weapon_dataset\\data.yaml --base yolo11n.pt --epochs 20 --imgsz 320 --batch 16 --workers 0 --device cpu --fraction 1.0 --best-output models/weapons/best.pt
+python training/evaluate_weapon_detector.py --data C:\\weapon_dataset\\data.yaml --weights models/weapons/best.pt --split val
+python training/evaluate_weapon_detector.py --data C:\\weapon_dataset\\data.yaml --weights models/weapons/best.pt --split test
+```
+
+The selected longer run used Ultralytics 8.4.171, YOLO11n pretrained COCO initialization, PyTorch CPU, 320-pixel images, batch 16, 20 epochs, full training split, and took 21,582.8 seconds (about 5 hours 59 minutes). Raw training runs are under `runs/weapons/longrun20/`. The validation-selected checkpoint is installed at `models/weapons/best.pt` (5.4 MB); `.gitignore` excludes model weights and run artifacts. Production resolves that path relative to the service, or reads an explicit `WEAPON_MODEL_PATH`. `app.weapon_moderator` lazily loads and caches the model, checks the exact class order, and returns model detections to the image decision engine. The service does not train at startup.
+
+The selected checkpoint validation metrics were precision 0.832, recall 0.692, mAP50 0.777, mAP50-95 0.547. Held-out test evaluation reported:
+
+| Class | Precision | Recall | mAP50 | mAP50-95 |
+|---|---:|---:|---:|---:|
+| Grenade | 0.881 | 0.712 | 0.788 | 0.635 |
+| Gun | 0.776 | 0.763 | 0.812 | 0.543 |
+| Knife | 0.709 | 0.623 | 0.666 | 0.381 |
+| Pistol | 0.830 | 0.739 | 0.818 | 0.584 |
+| Overall | 0.799 | 0.709 | 0.771 | 0.536 |
+
+The detector is experimental and still misses objects, especially Knife. At the detector confidence floor 0.25, the test confusion matrix (rows predicted, columns true, final column/row background) records 158 missed Grenades, 114 missed Guns, 108 missed Knives, and 83 missed Pistols. It also contains 670 unmatched predicted boxes across the test images: 126 Grenade, 237 Gun, 186 Knife, and 121 Pistol predictions. These are unmatched detection counts, not the number of images with false positives. Cross-class confusion is also present, including 149 true Guns predicted as Knife and 136 as Pistol. The policy thresholds remain warn >=0.40 and block >=0.70; they are separate from the detector's 0.25 inference floor. Missing or incompatible weights cause HTTP 503, never an allow result.
+
+## Real image inference
+
+Use the external dataset's held-out examples and optionally an image file such as `C:\\Users\\meeta\\Downloads\\gun.jpg`:
+
+```powershell
+python training/test_weapon_images.py --data C:\\weapon_dataset\\data.yaml --weights models/weapons/best.pt --image C:\\Users\\meeta\\Downloads\\gun.jpg
+```
+
+This runs actual model inference, the combined decision path, and a real in-process FastAPI request. It selects images from dataset annotations; it does not simulate predictions using filenames.
