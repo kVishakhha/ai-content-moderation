@@ -13,15 +13,25 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Messages table (Person B will build this)
+-- Messages table
 CREATE TABLE IF NOT EXISTS messages (
   id SERIAL PRIMARY KEY,
   sender_id INTEGER REFERENCES users(id),
   receiver_id INTEGER REFERENCES users(id),
-  content TEXT NOT NULL,
+  content TEXT,
+  message_type VARCHAR(10) NOT NULL DEFAULT 'text',
+  image_url TEXT,
+  mime_type VARCHAR(100),
   decision VARCHAR(10) DEFAULT 'pending',
   confidence_score FLOAT,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT messages_content_type_check CHECK (
+    message_type IN ('text', 'image') AND
+    (
+      (message_type = 'text' AND content IS NOT NULL AND mime_type IS NULL) OR
+      (message_type = 'image' AND mime_type IS NOT NULL)
+    )
+  )
 );
 
 -- Review Queue table (Person C will build this)

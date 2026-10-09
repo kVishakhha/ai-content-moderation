@@ -9,7 +9,8 @@ const chatRoutes = require('./routes/chat');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Keep this limit aligned with the API Gateway for base64-encoded image JSON.
+app.use(express.json({ limit: '8mb' }));
 
 // ----- HTTP server + Socket.IO on the same port (3002) -----
 const server = http.createServer(app);
