@@ -3,4 +3,3 @@ uvicorn[standard]
 pydantic
 detoxify
 torch
-a
