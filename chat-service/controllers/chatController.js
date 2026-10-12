@@ -1,5 +1,4 @@
 const pool = require('../config/db');
-const { mockModerate } = require('../config/mockModeration');
 const axios = require('axios');
 
 function getIO(req) {
@@ -9,51 +8,53 @@ function getOnlineUsers(req) {
   return req.app.get('onlineUsers');
 }
 
-// ============================================================
-// Moderation call with:
-//   1. a TIMEOUT so a slow/down moderation service never freezes chat
-//   2. a FAIL-SAFE fallback decision if moderation is unavailable
-//   3. LATENCY measurement (ms) returned alongside the result
-//
-// Fail policy: if moderation is unreachable we FAIL SAFE by treating
-// the message as "warn" (delivered but flagged) rather than silently
-// allowing it. This is a deliberate, defensible choice — discuss it
-// in the report: fail-open (allow) vs fail-closed (block) vs this
-// middle ground (deliver-but-flag).
-// ============================================================
-const MODERATION_TIMEOUT_MS = 800; // tune as needed
+const MODERATION_TIMEOUT_MS = 800;
+const VALID_DECISIONS = new Set(['allow', 'warn', 'block']);
+const MAX_MESSAGE_LENGTH = 5000;
 
+// Calls the real FastAPI moderation service. If it is unavailable or returns
+// an invalid response, keep the message visible as "warn" and mark fallback=true
+// so the UI/review workflow can distinguish this from a model decision.
 async function moderate(text) {
   const start = Date.now();
 
   try {
-    // ---- REAL model (Meetali's service on port 3003) ----
+    const serviceUrl = process.env.MODERATION_SERVICE_URL;
+    if (!serviceUrl) throw new Error('MODERATION_SERVICE_URL is not configured');
+
     const res = await axios.post(
-      `${process.env.MODERATION_SERVICE_URL}/moderate`,
+      `${serviceUrl.replace(/\/$/, '')}/moderate`,
       { text },
       { timeout: MODERATION_TIMEOUT_MS }
     );
-    const latencyMs = Date.now() - start;
+
+    const { score, decision } = res.data || {};
+    if (!VALID_DECISIONS.has(decision)) {
+      throw new Error('Moderation service returned an invalid decision');
+    }
+    if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) {
+      throw new Error('Moderation service returned an invalid score');
+    }
+
     return {
-      score: res.data.score,
-      decision: res.data.decision,
-      latencyMs,
-      moderated: true,        // real model answered
+      score,
+      decision,
+      latencyMs: Date.now() - start,
+      moderated: true,
       fallback: false,
     };
   } catch (err) {
     const latencyMs = Date.now() - start;
-    // Timeout, connection refused, or any moderation failure lands here.
-    const reason = err.code === 'ECONNABORTED' ? 'timeout' : (err.code || 'error');
-    console.warn(`moderation unavailable (${reason}) after ${latencyMs}ms — failing safe to 'warn'`);
+    const reason = err.code === 'ECONNABORTED' ? 'timeout' : (err.code || err.message || 'error');
+    console.warn(`moderation unavailable (${reason}) after ${latencyMs}ms — using fallback warn decision`);
 
-    // FAIL SAFE: deliver but flag, so nothing is silently let through,
-    // and a human can review it via the queue.
+    // Deliberate middle-ground policy: deliver but flag for review. This is
+    // NOT fail-closed; a strict safety deployment should block on this path.
     return {
       score: null,
       decision: 'warn',
       latencyMs,
-      moderated: false,       // real model did NOT answer
+      moderated: false,
       fallback: true,
     };
   }
@@ -63,20 +64,21 @@ async function moderate(text) {
 async function sendMessage(req, res) {
   try {
     const senderId = req.headers['x-user-id'];
-    const { receiver_id, content } = req.body;
+    const { receiver_id, content } = req.body || {};
 
     if (!senderId) return res.status(401).json({ error: 'No user id from gateway' });
-    if (!receiver_id || !content) {
-      return res.status(400).json({ error: 'receiver_id and content are required' });
+    if (!receiver_id || typeof content !== 'string' || !content.trim()) {
+      return res.status(400).json({ error: 'receiver_id and non-empty content are required' });
+    }
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({ error: `content must be ${MAX_MESSAGE_LENGTH} characters or fewer` });
     }
 
-    // moderate (with timeout + fallback + latency)
-    const { score, decision, latencyMs, moderated, fallback } = await moderate(content);
+    const { score, decision, latencyMs, fallback } = await moderate(content);
 
-    // Log the latency so we have real numbers for the report.
     console.log(
-      `[latency] moderation=${latencyMs}ms decision=${decision} ` +
-      `moderated=${moderated}${fallback ? ' (FALLBACK)' : ''}`
+      `[latency] moderation=${latencyMs}ms decision=${decision}` +
+      `${fallback ? ' (FALLBACK)' : ''}`
     );
 
     const result = await pool.query(
@@ -87,7 +89,6 @@ async function sendMessage(req, res) {
     );
     const saved = result.rows[0];
 
-    // real-time push if not blocked
     if (decision !== 'block') {
       const io = getIO(req);
       const online = getOnlineUsers(req);
@@ -102,8 +103,8 @@ async function sendMessage(req, res) {
       decision,
       score,
       delivered: decision !== 'block',
-      latencyMs,        // sent back so the UI/report can use it
-      fallback,         // true if moderation was unavailable
+      latencyMs,
+      fallback,
     });
   } catch (err) {
     console.error('sendMessage error:', err);
