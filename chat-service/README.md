@@ -1,42 +1,60 @@
-# Chat Service
+# Chat Service (Person B — Sowpy)
 
-Handles message sending, conversation history, user search, and Socket.IO presence. Runs on port **3002**.
+Handles sending/receiving messages and moderation.
+Runs on **port 3002**. Gateway already routes `/chat/*` here.
 
-## Run locally
+## Folder layout (matches user-service)
+```
+chat-service/
+  config/
+    db.js               <- Postgres pool (same as user-service)
+    mockModeration.js   <- TEMP fake moderation (remove when real one is live)
+  controllers/
+    chatController.js   <- send message + get conversation
+  routes/
+    chat.js
+  index.js              <- starts the server on 3002
+  package.json
+```
+(`Chat.jsx` also lives here for now — move it into `frontend/src/pages/Chat.jsx`.)
 
-1. Start PostgreSQL and initialize the root `schema.sql`.
-2. Copy the root `.env.example` to `.env`; set your database credentials and keep `MODERATION_SERVICE_URL=http://localhost:3003` for a local moderation API.
-3. Start the moderation API in another terminal (see the root README).
-4. Install and start the chat service:
-
-   ```bash
+## Run it
+1. Make sure Postgres is running and the `messages` table exists
+   (it's in the root `schema.sql` — run that once).
+2. Copy the root `.env.example` to `.env` and fill in your DB password.
+3. Install + start:
+   ```
    cd chat-service
    npm install
    npm start
    ```
+4. You should see:
+   ```
+   Database connected successfully
+   Chat Service running on port 3002
+   ```
 
 ## Endpoints
+- `POST /chat/send` — body `{ receiver_id, content }`. Sender comes from the
+  `x-user-id` header the gateway forwards. Returns `{ message, decision, score, delivered }`.
+- `GET /chat/conversation/:otherUserId` — messages between you and that user.
 
-- `POST /chat/send` — body `{ "receiver_id": "...", "content": "..." }`. Sender identity is read from the `x-user-id` header that the gateway must set after authenticating the request. Returns the saved message, decision, score, delivery status, moderation latency, and a `fallback` flag.
-- `GET /chat/conversation/:otherUserId` — messages between the authenticated user and another user.
-- `GET /chat/conversations` — conversation list.
-- `GET /chat/users/search?q=...` — search users.
+## Moderation: mock now, real later
+Right now messages are scored by `config/mockModeration.js` (keyword rules,
+just so you can see allow/warn/block working).
 
-## Moderation integration status
+**When Meetali's `/moderate` (port 3003) is ready**, open
+`controllers/chatController.js`, find the `moderate()` function, and switch
+from the mock line to the axios block. That's the ONLY change.
 
-The current `controllers/chatController.js` calls the real FastAPI service at `MODERATION_SERVICE_URL + /moderate`. It does **not** call `config/mockModeration.js`; that file is legacy mock code and is not part of the active request path.
+Agreed contract (confirm with Meetali):
+```
+POST /moderate
+request:  { "text": "..." }
+response: { "score": 0.0-1.0, "decision": "allow" | "warn" | "block" }
+```
 
-The expected API contract is:
-
-- Request: `{ "text": "message text" }`
-- Response: `{ "score": 0.0-1.0, "decision": "allow" | "warn" | "block", "categories": { ... } }`
-
-The chat service validates the returned decision and score. Requests time out after 800 ms. If the service is unreachable, times out, or returns an invalid response, the chat service stores a fallback `warn` with a null score and returns `fallback: true`.
-
-**Important policy detail:** this fallback is *deliver-but-flag*, not fail-closed: a message can still be delivered while moderation is unavailable. For deployments that require strict blocking, change and test this policy explicitly.
-
-## Security notes
-
-- The gateway must authenticate the user, remove any client-supplied `x-user-id` header, and set that header from the verified identity. Do not expose the chat service directly to untrusted clients.
-- Configure CORS and Socket.IO allowed origins for the actual frontend instead of using wildcard origins in production.
-- Keep secrets in an untracked `.env`; never commit production credentials.
+## Note on the messages table
+Uses Vishakha's `schema.sql` columns: `decision` and `confidence_score`
+(score is stored in `confidence_score`). Don't rename these without telling
+the team — analytics reads them.
