@@ -2,22 +2,22 @@
 
 An academic software engineering project exploring AI-assisted content moderation for a messaging application. The repository contains a React frontend, Node.js services, a PostgreSQL schema, and a Python moderation API.
 
-> **Repository status:** The text moderation API is implemented in the current `main` branch. The chat service README describes a mock moderation path, so verify the integration before treating end-to-end moderation as complete. Features developed on other branches may not be available on `main`.
+> **Repository status:** The current `main` branch includes a FastAPI text moderation API and a chat controller that calls it through `MODERATION_SERVICE_URL`. If the API is unavailable or returns an invalid response, chat stores a fallback `warn` decision and sets `fallback: true`; this fallback still delivers the message, so it is not fail-closed. The legacy `chat-service/config/mockModeration.js` file is not used by the active controller.
 
 ## What it includes
 
 ### Text moderation API
 - **FastAPI** endpoint for text scoring.
 - **Detoxify** (`original-small`) for category-level toxicity predictions.
-- Separate thresholds for categories such as toxicity, severe toxicity, obscenity, insults, threats, and identity attacks.
+- Separate thresholds for toxicity, severe toxicity, obscenity, insults, threats, and identity attacks.
 - Text de-obfuscation and additional checks for disguised profanity or threats.
 - Keyword-based fallback when the ML model cannot be loaded or a prediction fails.
-- A structured `allow`, `warn`, or `block` decision, with category scores.
+- Structured `allow`, `warn`, or `block` decisions with category scores.
 
 ### Application services
 - **API gateway:** Express-based request routing and JWT verification.
 - **User service:** Authentication-related service with PostgreSQL support.
-- **Chat service:** Messaging endpoints and Socket.IO presence updates.
+- **Chat service:** Messaging endpoints, real moderation API calls, and Socket.IO presence updates.
 - **Analytics service:** Separate service area for analytics.
 - **Frontend:** React application built with Vite.
 - **Database:** PostgreSQL schema for users, messages, and a review queue.
@@ -32,15 +32,14 @@ API Gateway (Express + JWT)
      |
      +------ User Service
      +------ Chat Service ---- PostgreSQL
-     +------ Analytics Service
-     
-Moderation API (FastAPI + Detoxify)
-     |
-     +------ Category scores
-     +------ allow / warn / block
+                  |
+                  +---- POST /moderate
+                           |
+                           v
+                   FastAPI + Detoxify
+                           |
+                           +---- score + allow / warn / block
 ```
-
-The moderation API is a separate service in the current repository. Check the chat service implementation and active branch before assuming requests are routed to it in the running application.
 
 ## Tech stack
 
@@ -51,7 +50,7 @@ The moderation API is a separate service in the current repository. Check the ch
 | Moderation | Python, FastAPI, Detoxify, PyTorch |
 | Database | PostgreSQL |
 | Authentication | JWT |
-| Development | Git, npm, Python virtual environments |
+| Development | Git, npm, Python virtual environments, GitHub Actions |
 
 ## Run the moderation API locally
 
@@ -78,7 +77,7 @@ Activate it:
 
 **Windows PowerShell**
 ```powershell
-.\.venv\Scripts\Activate.ps1
+.\\.venv\\Scripts\\Activate.ps1
 ```
 
 **macOS / Linux**
@@ -93,45 +92,50 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 3003
 ```
 
-The API should be available at `http://localhost:3003`. Interactive API documentation is available at `http://localhost:3003/docs`.
+The API is available at `http://localhost:3003`; interactive docs are at `http://localhost:3003/docs`.
 
-### 4. Check service health
+### 4. Configure and start chat service
+
+Set `MODERATION_SERVICE_URL=http://localhost:3003` in the root `.env` and start the chat service in another terminal:
+
+```bash
+cd chat-service
+npm install
+npm start
+```
+
+The chat controller calls `POST /moderate`. It accepts decisions only from `allow`, `warn`, or `block` and scores in the range 0–1. Messages must contain non-empty text of at most 5,000 characters.
+
+### 5. Health and moderation checks
 
 ```bash
 curl http://localhost:3003/health
-```
-
-### 5. Submit text for moderation
-
-```bash
 curl -X POST http://localhost:3003/moderate \
   -H "Content-Type: application/json" \
   -d '{"text":"You are very kind"}'
 ```
 
-The response contains a score, a decision, and per-category scores. Model predictions are probabilistic and should not be treated as a perfect or context-aware safety judgment.
+Predictions are probabilistic and are not a perfect or fully context-aware safety judgment.
 
-## Database and other services
+## Tests and continuous integration
 
-The root `.env.example` documents the expected PostgreSQL connection settings, JWT secret, service ports, and service URLs. Configure local environment variables for the services you run; never commit real passwords, tokens, or secrets.
+A GitHub Actions workflow runs Python syntax checks and deterministic tests for the moderation decision thresholds and obfuscation rules without downloading the ML model. These checks do not replace live API, database, or end-to-end tests.
 
-The root `schema.sql` defines the initial users, messages, and review queue tables. Review each service's README and configuration before starting the full application; the services are launched separately.
+## Limitations and deployment notes
 
-## Important limitations
-
-- Moderation scores can produce false positives and false negatives.
+- Moderation can produce false positives and false negatives; thresholds require evaluation on representative data.
 - Keyword fallback is a resilience mechanism, not equivalent to the ML model.
-- Thresholds require evaluation against representative examples before any real-world deployment.
-- The repository should be tested end-to-end before claiming production readiness.
-- Restrict CORS and secure authentication and service-to-service communication before deployment.
+- The chat-service outage policy is currently deliver-but-flag. Choose a stricter policy explicitly if required by the use case.
+- The gateway must strip client-provided identity headers and inject `x-user-id` only after JWT verification; do not expose the chat service directly.
+- Restrict HTTP and Socket.IO CORS origins and secure service-to-service communication before deployment.
+- The repository should not be described as production-ready until API, database, and end-to-end tests have been run.
 
 ## Future improvements
 
 - Add a reproducible evaluation dataset and report precision, recall, and F1 by category.
-- Add automated API and integration tests.
-- Document the current chat-to-moderation integration path.
-- Add screenshots or a short demo of the frontend.
-- Provide deployment instructions after the service configuration is validated.
+- Add integration tests for the FastAPI endpoint and chat-to-moderation flow.
+- Add screenshots or a short frontend demo.
+- Document validated deployment instructions.
 
 ## Author
 
