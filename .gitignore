@@ -1,31 +1,17 @@
-# Environment variables - commit only the example template
+# Environment variables - never commit real secrets
 .env
-.env.*
-!.env.example
 
-# Node.js dependencies and generated output
+# Node modules - these are huge and can be reinstalled anytime
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
-coverage/
-.nyc_output/
-dist/
-build/
 
-# Python environments, caches, and test artifacts
+# Python
 .venv/
-venv/
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+*.pyc
 
-# Local editor and OS files
-.vscode/
-.idea/
+# Logs
+*.log
+
+# OS files
 .DS_Store
 Thumbs.db
