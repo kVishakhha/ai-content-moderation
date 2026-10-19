@@ -3,19 +3,21 @@ import { io } from 'socket.io-client';
 import api from '../api';
 import { useAuth } from '../context/AuthContext';
 
-// The chat service runs on 3002. The socket connects DIRECTLY to it
-// (sockets don't go through the gateway here). REST still goes via api (gateway).
-const SOCKET_URL = 'http://localhost:3002';
+// REST and Socket.IO both enter through the gateway; it proxies websocket upgrades.
+const SOCKET_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp'];
 
 export default function Chat() {
-  const { user, logout } = useAuth();
+  const { user, token, logout } = useAuth();
   const userId = user?.userId;     // useAuth() returns { user: { userId, role } }
-  const myRole = user?.role;
 
   const [conversations, setConversations] = useState([]);
   const [activeUser, setActiveUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [content, setContent] = useState('');
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState(null);
 
   const [showSearch, setShowSearch] = useState(false);
@@ -34,18 +36,33 @@ export default function Chat() {
 
   const socketRef = useRef(null);
   const bottomRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   // styles rebuild when theme changes
   const S = useMemo(() => makeStyles(theme), [theme]);
 
+  const fetchConversations = useCallback(async () => {
+    const res = await api.get('/chat/conversations');
+    return res.data.conversations || [];
+  }, []);
+
+  const loadConversations = useCallback(async () => {
+    try {
+      setConversations(await fetchConversations());
+    } catch (err) { console.error(err); }
+  }, [fetchConversations]);
+
   // ---------- socket ----------
   useEffect(() => {
-    if (!userId) return;
-    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    if (!userId || !token) return;
+    const socket = io(SOCKET_URL, {
+      transports: ['websocket'],
+      auth: { token },
+    });
     socketRef.current = socket;
 
-    socket.on('connect', () => socket.emit('register', userId));
     socket.on('presence', (ids) => setOnlineIds(ids.map(String)));
+    socket.on('connect_error', () => setNotice('Real-time connection unavailable. Chat history and sending still work.'));
 
     socket.on('new_message', (msg) => {
       // Ignore our OWN messages coming back over the socket —
@@ -68,17 +85,17 @@ export default function Chat() {
     });
 
     return () => socket.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+  }, [userId, token, loadConversations]);
 
-  const loadConversations = useCallback(async () => {
-    try {
-      const res = await api.get('/chat/conversations');
-      setConversations(res.data.conversations || []);
-    } catch (err) { console.error(err); }
-  }, []);
-
-  useEffect(() => { loadConversations(); }, [loadConversations]);
+  useEffect(() => {
+    let active = true;
+    fetchConversations()
+      .then((items) => {
+        if (active) setConversations(items);
+      })
+      .catch((err) => console.error(err));
+    return () => { active = false; };
+  }, [fetchConversations]);
 
   async function openConversation(u) {
     setActiveUser(u);
@@ -94,19 +111,55 @@ export default function Chat() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  async function handleSend() {
-    if (!content.trim() || !activeUser) return;
-    const text = content.trim();
-    setContent('');
+  function handleImageSelect(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!IMAGE_TYPES.includes(file.type)) {
+      setNotice('Choose a JPEG, PNG, WebP, GIF, or BMP image.');
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      setNotice('Images must be 10 MiB or smaller.');
+      return;
+    }
     setNotice(null);
+    setSelectedImage(file);
+  }
+
+  async function handleSend() {
+    const text = content.trim();
+    if ((!text && !selectedImage) || !activeUser || sending) return;
+    setNotice(null);
+    setSending(true);
     try {
-      const res = await api.post('/chat/send', { receiver_id: activeUser.id, content: text });
+      const payload = { receiver_id: activeUser.id };
+      if (text) payload.content = text;
+      if (selectedImage) {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('Could not read the selected image'));
+          reader.readAsDataURL(selectedImage);
+        });
+        payload.image_base64 = dataUrl.split(',')[1];
+        payload.mime_type = selectedImage.type;
+      }
+
+      const res = await api.post('/chat/send', payload);
       const { decision, message } = res.data;
       if (decision === 'block') setNotice('Your message was blocked and not delivered.');
       else if (decision === 'warn') setNotice('Sent — flagged for review.');
       setMessages((prev) => [...prev, message]);
+      setContent('');
+      setSelectedImage(null);
       loadConversations();
-    } catch (err) { console.error(err); setNotice('Could not send. Try again.'); }
+    } catch (err) {
+      console.error(err);
+      setNotice(err.response?.data?.error || 'Could not send. Try again.');
+    } finally {
+      setSending(false);
+    }
   }
 
   async function runSearch(q) {
@@ -243,7 +296,8 @@ export default function Chat() {
                       </div>
                     ) : (
                       <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs) }}>
-                        <div>{m.content}</div>
+                        {m.image_url && <AuthenticatedImage imageUrl={m.image_url} />}
+                        {m.content && <div>{m.content}</div>}
                         <div style={S.bubbleMeta}>
                           <span>{timeOf(m.created_at)}</span>
                           {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
@@ -260,10 +314,32 @@ export default function Chat() {
             {notice && <div style={S.notice}>{notice}</div>}
 
             <div style={S.inputBar}>
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept={IMAGE_TYPES.join(',')}
+                onChange={handleImageSelect}
+                style={{ display: 'none' }}
+              />
+              <button
+                style={S.attachBtn}
+                className="hoverable"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={sending}
+                title="Attach an image"
+              >Image</button>
               <input style={S.msgInput} placeholder="Type a message..." value={content}
                      onChange={(e) => setContent(e.target.value)}
                      onKeyDown={(e) => e.key === 'Enter' && handleSend()} />
-              <button style={S.sendBtn} className="hoverable" onClick={handleSend}>Send</button>
+              {selectedImage && (
+                <span style={S.selectedImage} title={selectedImage.name}>
+                  {selectedImage.name}
+                  <button style={S.removeImageBtn} onClick={() => setSelectedImage(null)} aria-label="Remove image">×</button>
+                </span>
+              )}
+              <button style={S.sendBtn} className="hoverable" onClick={handleSend} disabled={sending}>
+                {sending ? 'Sending...' : 'Send'}
+              </button>
             </div>
           </>
         )}
@@ -283,6 +359,33 @@ export default function Chat() {
       )}
     </div>
   );
+}
+
+function AuthenticatedImage({ imageUrl }) {
+  const [source, setSource] = useState('');
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl;
+    api.get(imageUrl, { responseType: 'blob' })
+      .then((response) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(response.data);
+        setSource(objectUrl);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageUrl]);
+
+  if (failed) return <div role="img" aria-label="Image unavailable">Image unavailable</div>;
+  if (!source) return <div>Loading image...</div>;
+  return <img src={source} alt="Moderated chat attachment" style={{ maxWidth: '100%', maxHeight: 280, borderRadius: 10 }} />;
 }
 
 const CSS_ANIM = `
@@ -382,6 +485,11 @@ function makeStyles(theme) {
     inputBar: { display: 'flex', gap: 10, padding: 16, borderTop: `1px solid ${C.border}`, background: C.sidebar },
     msgInput: { flex: 1, padding: '12px 16px', borderRadius: 24, border: `1px solid ${C.border}`,
       background: C.card, color: C.text, fontSize: 14, outline: 'none' },
+    attachBtn: { padding: '10px 14px', borderRadius: 20, border: `1px solid ${C.border}`,
+      background: C.card, color: C.text, fontWeight: 600, cursor: 'pointer' },
+    selectedImage: { maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      fontSize: 12, color: C.textDim },
+    removeImageBtn: { marginLeft: 5, border: 'none', background: 'transparent', color: C.text, cursor: 'pointer' },
     sendBtn: { padding: '12px 24px', borderRadius: 24, border: 'none', background: C.accent,
       color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer' },
 

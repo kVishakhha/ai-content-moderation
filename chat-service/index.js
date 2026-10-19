@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const pool = require('./config/db');
@@ -9,13 +10,28 @@ const chatRoutes = require('./routes/chat');
 
 const app = express();
 app.use(cors());
-// Keep this limit aligned with the API Gateway for base64-encoded image JSON.
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '15mb' }));
 
 // ----- HTTP server + Socket.IO on the same port (3002) -----
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' }, // dev only; lock down in production
+});
+
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (typeof token !== 'string') {
+    return next(new Error('Authentication required'));
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (!decoded.userId) return next(new Error('Invalid token'));
+    socket.data.userId = String(decoded.userId);
+    return next();
+  } catch {
+    return next(new Error('Invalid or expired token'));
+  }
 });
 
 // Track which user is connected on which socket.
@@ -32,13 +48,10 @@ function broadcastPresence() {
 }
 
 io.on('connection', (socket) => {
-  // The frontend tells us who it is right after connecting.
-  socket.on('register', (userId) => {
-    if (userId == null) return;
-    onlineUsers.set(String(userId), socket.id);
-    console.log(`User ${userId} online (socket ${socket.id})`);
-    broadcastPresence();
-  });
+  const userId = socket.data.userId;
+  onlineUsers.set(userId, socket.id);
+  console.log(`User ${userId} online (socket ${socket.id})`);
+  broadcastPresence();
 
   socket.on('disconnect', () => {
     for (const [uid, sid] of onlineUsers.entries()) {
@@ -56,6 +69,17 @@ io.on('connection', (socket) => {
 app.use('/chat', chatRoutes);
 app.get('/health', (req, res) => {
   res.json({ status: 'Chat Service is running' });
+});
+
+// Return bounded, machine-readable errors for body-parser failures.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body is too large' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && Object.prototype.hasOwnProperty.call(err, 'body')) {
+    return res.status(400).json({ error: 'Request body must be valid JSON' });
+  }
+  return next(err);
 });
 
 const PORT = process.env.CHAT_SERVICE_PORT || 3002;

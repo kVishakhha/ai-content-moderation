@@ -1,27 +1,40 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState } from 'react';
 
 const AuthContext = createContext();
 
-export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
-  const [token, setToken] = useState(localStorage.getItem('token'));
+function getUserFromToken(token) {
+  try {
+    const encodedPayload = token.split('.')[1];
+    if (!encodedPayload) return null;
 
-  useEffect(() => {
-    if (token) {
-      // Decode token to get user info
-      try {
-        const payload = JSON.parse(atob(token.split('.')[1]));
-        setUser({ userId: payload.userId, role: payload.role });
-      } catch {
-        setToken(null);
-        localStorage.removeItem('token');
-      }
-    }
-  }, [token]);
+    const base64 = encodedPayload.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+    if (!payload.userId || !['user', 'admin'].includes(payload.role)) return null;
+    if (payload.exp && payload.exp * 1000 <= Date.now()) return null;
+
+    return { userId: payload.userId, role: payload.role };
+  } catch {
+    return null;
+  }
+}
+
+export const AuthProvider = ({ children }) => {
+  const [token, setToken] = useState(() => {
+    const savedToken = localStorage.getItem('token');
+    if (savedToken && getUserFromToken(savedToken)) return savedToken;
+    localStorage.removeItem('token');
+    return null;
+  });
+  const [user, setUser] = useState(() => (token ? getUserFromToken(token) : null));
 
   const login = (newToken) => {
+    const newUser = getUserFromToken(newToken);
+    if (!newUser) throw new Error('Login returned an invalid or expired token');
+
     localStorage.setItem('token', newToken);
     setToken(newToken);
+    setUser(newUser);
+    return newUser;
   };
 
   const logout = () => {
@@ -37,4 +50,5 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => useContext(AuthContext);

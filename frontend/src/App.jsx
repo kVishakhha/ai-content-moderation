@@ -5,17 +5,16 @@ import Register from './pages/Register';
 import Chat from './pages/Chat';
 import Admin from './pages/Admin';
 
-// Protected route - must be logged in
-const PrivateRoute = ({ children }) => {
-  const { token } = useAuth();
-  return token ? children : <Navigate to="/login" />;
+const RoleRoute = ({ children, role }) => {
+  const { token, user } = useAuth();
+  if (!token || !user) return <Navigate to="/login" replace />;
+  if (user.role !== role) return <Navigate to={user.role === 'admin' ? '/admin' : '/chat'} replace />;
+  return children;
 };
 
-// Admin route - must be logged in AND be admin
-const AdminRoute = ({ children }) => {
+const PublicRoute = ({ children }) => {
   const { token, user } = useAuth();
-  if (!token) return <Navigate to="/login" />;
-  if (user?.role !== 'admin') return <Navigate to="/chat" />;
+  if (token && user) return <Navigate to={user.role === 'admin' ? '/admin' : '/chat'} replace />;
   return children;
 };
 
@@ -24,19 +23,26 @@ const App = () => {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
+          <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
+          <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
           <Route path="/chat" element={
-            <PrivateRoute><Chat /></PrivateRoute>
+            <RoleRoute role="user"><Chat /></RoleRoute>
           } />
           <Route path="/admin" element={
-            <AdminRoute><Admin /></AdminRoute>
+            <RoleRoute role="admin"><Admin /></RoleRoute>
           } />
-          <Route path="/" element={<Navigate to="/login" />} />
+          <Route path="/" element={<HomeRedirect />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
   );
+};
+
+const HomeRedirect = () => {
+  const { token, user } = useAuth();
+  if (!token || !user) return <Navigate to="/login" replace />;
+  return <Navigate to={user.role === 'admin' ? '/admin' : '/chat'} replace />;
 };
 
 export default App;

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   sendMessage,
+  getImage,
   getConversation,
   getConversationList,
   searchUsers,
@@ -9,6 +10,8 @@ const {
 
 // send a message (gets moderated, then pushed live if allowed)
 router.post('/send', sendMessage);
+
+router.get('/media/:filename', getImage);
 
 // sidebar: list of people you've chatted with + last message
 router.get('/conversations', getConversationList);

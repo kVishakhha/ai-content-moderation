@@ -3,4 +3,7 @@ uvicorn[standard]
 pydantic
 detoxify
 torch
-a
+transformers
+Pillow
+ultralytics
+PyYAML
