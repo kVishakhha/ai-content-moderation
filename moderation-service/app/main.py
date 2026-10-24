@@ -2,21 +2,33 @@
 import base64
 import binascii
 import io
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from PIL import Image
 from .schemas import (
     ModerationRequest, ModerationResponse, ImageModerationRequest,
     ImageModerationResponse, ModerateContentRequest, ModerateContentResponse,
 )
-from .model import score_text
-from .decision_engine import decide
+from .model import TextModelError, configured_backend, initialize_text_model, score_text
+from .decision_engine import decide, decide_distilbert
 from .image_moderator import moderate_image_bytes, InvalidImageError, ImageModelError
 from .weapon_moderator import WeaponModelError
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("moderation")
 
-app = FastAPI(title="Moderation Service", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        backend = initialize_text_model()
+        log.info("Text moderation backend ready: %s", backend)
+    except TextModelError:
+        log.exception("Configured text moderation backend failed to initialize")
+        raise
+    yield
+
+
+app = FastAPI(title="Moderation Service", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -25,8 +37,19 @@ def health():
 
 
 def _moderate_text(text: str) -> ModerationResponse:
-    categories = score_text(text)
-    score, decision = decide(categories)
+    try:
+        categories = score_text(text)
+    except TextModelError as exc:
+        log.exception("Text moderation unavailable; failing closed")
+        raise HTTPException(status_code=503, detail="Text moderation is unavailable") from exc
+    try:
+        if configured_backend() == "distilbert":
+            score, decision = decide_distilbert(categories)
+        else:
+            score, decision = decide(categories)
+    except ValueError as exc:
+        log.exception("Text moderation thresholds are invalid")
+        raise HTTPException(status_code=503, detail="Text moderation is misconfigured") from exc
     log.info("moderate len=%d score=%.2f decision=%s", len(text), score, decision)
     return ModerationResponse(
         score=round(score, 4),

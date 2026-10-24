@@ -7,7 +7,10 @@ require('dotenv').config();
 
 const app = express();
 
-app.use(cors());
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
+  : true;
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '15mb' }));
 
 app.get('/health', (req, res) => {
@@ -17,6 +20,7 @@ app.get('/health', (req, res) => {
 // JWT verification middleware
 const verifyToken = (req, res, next) => {
   if (
+    req.path === '/health' && req.method === 'GET' ||
     req.path === '/auth/login' && req.method === 'POST' ||
     req.path === '/auth/register' && req.method === 'POST'
   ) {

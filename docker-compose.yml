@@ -51,15 +51,46 @@ services:
       postgres:
         condition: service_healthy
       moderation-service:
-        condition: service_started
+        condition: service_healthy
 
   moderation-service:
     build: ./moderation-service
     environment:
       MODERATION_SERVICE_PORT: 3003
       WEAPON_MODEL_PATH: /models/weapons/best.pt
+      TORCH_HOME: /root/.cache/torch
+      TEXT_MODEL_BACKEND: ${TEXT_MODEL_BACKEND:-detoxify}
+      DISTILBERT_MODEL_PATH: ${DISTILBERT_MODEL_PATH:-/artifacts/distilbert}
+      DISTILBERT_WARN_THRESHOLD: ${DISTILBERT_WARN_THRESHOLD:-0.30}
+      DISTILBERT_BLOCK_THRESHOLD: ${DISTILBERT_BLOCK_THRESHOLD:-0.50}
     volumes:
       - ./moderation-service/models:/models:ro
+      - ./moderation-service/training/artifacts:/artifacts:ro
+      - moderation_model_cache:/root/.cache/torch
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3003/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 600s
+
+  analytics-service:
+    build: ./analytics-service
+    environment:
+      ANALYTICS_SERVICE_PORT: 3004
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-ai_moderation}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the root .env file}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the root .env file}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   api-gateway:
     build: ./api-gateway
@@ -67,13 +98,16 @@ services:
       GATEWAY_PORT: 3000
       JSON_BODY_LIMIT: ${JSON_BODY_LIMIT:-15mb}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the root .env file}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
       USER_SERVICE_URL: http://user-service:3001
       CHAT_SERVICE_URL: http://chat-service:3002
       MODERATION_SERVICE_URL: http://moderation-service:3003
+      ANALYTICS_SERVICE_URL: http://analytics-service:3004
     depends_on:
       - user-service
       - chat-service
       - moderation-service
+      - analytics-service
     ports:
       - "${GATEWAY_PORT:-3000}:3000"
 
@@ -90,3 +124,4 @@ services:
 volumes:
   postgres_data:
   chat_uploads:
+  moderation_model_cache:

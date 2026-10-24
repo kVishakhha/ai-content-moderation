@@ -28,6 +28,11 @@ conversation participants. Blocked images are neither stored nor
 socket-delivered. See [`docs/image-integration.md`](../docs/image-integration.md)
 for the storage contract.
 
+Warning decisions are retained and delivered according to the existing chat
+policy, and a database trigger adds them to the admin review queue. Admins can
+inspect warning content and record confirmed/dismissed outcomes through the
+Analytics Service; review does not change the original moderation decision.
+
 ## Local run
 
 Configure PostgreSQL and the values in the root `.env.example`, then run:

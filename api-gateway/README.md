@@ -19,5 +19,6 @@ The Gateway uses `http-proxy-middleware` for Socket.IO WebSocket upgrades at
 Service verifies the JWT in the Socket.IO handshake.
 
 The JSON body limit defaults to `15mb` for image payloads and is shared with
-Chat Service through `JSON_BODY_LIMIT`. Analytics forwarding is configured,
-but the Analytics Service implementation is not present in this branch.
+Chat Service through `JSON_BODY_LIMIT`. Set `CORS_ORIGIN` to a comma-separated
+list of trusted frontend origins before hosting the Gateway publicly.
+Analytics forwarding routes admin requests to the Analytics Service.

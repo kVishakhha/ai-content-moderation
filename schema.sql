@@ -34,12 +34,34 @@ CREATE TABLE IF NOT EXISTS messages (
   )
 );
 
--- Review Queue table (Person C will build this)
+-- Warning messages are added to this queue by the trigger below.
 CREATE TABLE IF NOT EXISTS review_queue (
   id SERIAL PRIMARY KEY,
-  message_id INTEGER REFERENCES messages(id),
+  message_id INTEGER UNIQUE REFERENCES messages(id),
   ai_score FLOAT,
   status VARCHAR(20) DEFAULT 'pending',
+  resolution VARCHAR(20),
   admin_id INTEGER REFERENCES users(id),
-  resolved_at TIMESTAMP
+  resolved_at TIMESTAMP,
+  CONSTRAINT review_queue_resolution_check CHECK (
+    resolution IS NULL OR resolution IN ('confirmed', 'dismissed')
+  )
 );
+
+CREATE OR REPLACE FUNCTION enqueue_warned_message_for_review()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.decision = 'warn' THEN
+    INSERT INTO review_queue (message_id, ai_score, status)
+    VALUES (NEW.id, NEW.confidence_score, 'pending')
+    ON CONFLICT (message_id) DO NOTHING;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS messages_enqueue_review ON messages;
+CREATE TRIGGER messages_enqueue_review
+AFTER INSERT ON messages
+FOR EACH ROW
+EXECUTE FUNCTION enqueue_warned_message_for_review();

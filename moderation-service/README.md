@@ -4,7 +4,20 @@ FastAPI service with separate text and image moderation paths.
 
 ## Text moderation
 
-`POST /moderate` continues to use Detoxify (`original-small`) with the existing text decision engine. The separate Phase-II DistilBERT experiment is not used for live text moderation.
+`POST /moderate` and text in `/moderate-content` use Detoxify
+(`original-small`) by default. Set `TEXT_MODEL_BACKEND=distilbert` to run the
+fine-tuned six-label DistilBERT classifier instead. Configure its local model
+directory or public Hugging Face model ID with `DISTILBERT_MODEL_PATH`. A
+missing or unusable DistilBERT model returns HTTP 503. The default Detoxify
+backend preserves its documented keyword fallback and logs when that fallback
+is active.
+
+DistilBERT probabilities use separate overall decision thresholds:
+`DISTILBERT_WARN_THRESHOLD` (default `0.30`) and
+`DISTILBERT_BLOCK_THRESHOLD` (default `0.50`). These are demo defaults, not a
+calibrated moderation policy. The documented experiment found weak results for
+rare classes, especially threat, so evaluate the exact checkpoint on held-out
+examples before selecting it for a demonstration.
 
 ## Image Moderation
 

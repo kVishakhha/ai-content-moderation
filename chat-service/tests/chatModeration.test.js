@@ -239,6 +239,30 @@ test('image endpoint returns stored bytes only to a message participant', async 
   assert.equal(unauthorized.statusCode, 404);
 });
 
+test('admin can retrieve a non-blocked image for moderation review', async () => {
+  const image = moderationResult({ imageDecision: 'warn', imageScore: 0.4, confidence: 0.4 });
+  await harness({ image_base64: 'aW1hZ2U=', mime_type: 'image/jpeg' }, image);
+  const imageUrl = response.body.message.image_url;
+  fakePool.query = async (_sql, values) => {
+    assert.equal(values[2], 'admin');
+    return { rows: [{ mime_type: 'image/jpeg' }] };
+  };
+  const imageResponse = {
+    headers: {},
+    statusCode: 200,
+    status(code) { this.statusCode = code; return this; },
+    json(data) { this.body = data; return this; },
+    set(name, value) { this.headers[name] = value; return this; },
+    send(data) { this.body = data; return this; },
+  };
+  await getImage({
+    headers: { 'x-user-id': '99', 'x-user-role': 'admin' },
+    params: { filename: path.basename(imageUrl) },
+  }, imageResponse);
+  assert.equal(imageResponse.statusCode, 200);
+  assert.deepEqual(imageResponse.body, Buffer.from('image'));
+});
+
 test('moderation timeout fails closed without a database write', async () => {
   const error = new Error('timeout'); error.code = 'ECONNABORTED';
   await harness({ content: 'hello' }, null, error);

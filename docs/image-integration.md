@@ -32,14 +32,21 @@ The Gateway continues to accept and forward JSON. Image sends use this shape at 
 
 For allowed/warned images, Chat Service stores the image bytes outside PostgreSQL, then persists its URL, MIME type, optional caption, decision and confidence score. Chat history and Socket.IO payloads return the same message fields, including the retrievable `image_url`. Blocked image bytes are not stored or socket-delivered; only their metadata is retained, with no image URL.
 
+Warning messages are added to `review_queue` automatically by a PostgreSQL
+trigger. Admins can view pending warnings and mark them `confirmed` or
+`dismissed`; this records the review outcome and admin ID without changing the
+original moderation decision. Authenticated admins can view non-blocked image
+bytes for review through the media endpoint.
+
 ## Payload limits
 
 The API Gateway and Chat Service both use `express.json({ limit: '15mb' })` by default. Keep these limits synchronized. The moderation API accepts decoded images up to 10 MiB, so enforce that same raw-image cap on the client and server; base64 encoding and JSON fields expand the request to roughly 14 MiB.
 
 ## Existing databases
 
-Apply the additive migration from the repository root:
+Apply the additive migrations from the repository root to an existing database:
 
 ```bash
 psql -d ai_moderation -f migrations/001_add_image_support.sql
+psql -d ai_moderation -f migrations/002_add_review_queue_workflow.sql
 ```

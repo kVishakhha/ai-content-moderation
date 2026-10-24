@@ -235,6 +235,7 @@ async function sendMessage(req, res) {
 async function getImage(req, res) {
   try {
     const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
     const { filename } = req.params;
     if (!userId) return res.status(401).json({ error: 'No user id from gateway' });
     if (!/^[0-9a-f-]{36}\.(jpg|png|webp|gif|bmp)$/.test(filename)) {
@@ -246,9 +247,9 @@ async function getImage(req, res) {
       `SELECT mime_type FROM messages
        WHERE image_url = $1
          AND decision <> 'block'
-         AND (sender_id = $2 OR receiver_id = $2)
+         AND (sender_id = $2 OR receiver_id = $2 OR $3 = 'admin')
        LIMIT 1`,
-      [imageUrl, userId]
+      [imageUrl, userId, userRole]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Image not found' });
 

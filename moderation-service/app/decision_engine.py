@@ -53,3 +53,21 @@ def decide(categories: Dict[str, float]) -> Tuple[float, str]:
         return overall_score, "warn"
 
     return overall_score, "allow"
+
+
+def decide_distilbert(categories: Dict[str, float]) -> Tuple[float, str]:
+    import os
+
+    warn_threshold = float(os.getenv("DISTILBERT_WARN_THRESHOLD", "0.30"))
+    block_threshold = float(os.getenv("DISTILBERT_BLOCK_THRESHOLD", "0.50"))
+    if not 0.0 <= warn_threshold < block_threshold <= 1.0:
+        raise ValueError(
+            "DistilBERT thresholds must satisfy 0 <= warn < block <= 1"
+        )
+
+    score = max((float(value) for value in categories.values()), default=0.0)
+    if score >= block_threshold:
+        return score, "block"
+    if score >= warn_threshold:
+        return score, "warn"
+    return score, "allow"
