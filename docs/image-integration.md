@@ -12,7 +12,7 @@ The `messages` table keeps the existing moderation fields and adds image metadat
 
 Image bytes are stored outside PostgreSQL in Chat Service's configured `IMAGE_STORAGE_DIR` (a persistent Docker volume for the Compose demo). Chat Service generates an unguessable filename and persists an `image_url` such as `/chat/media/<uuid>.jpg`. The frontend retrieves that URL through the API Gateway with its JWT; Chat Service only serves an image to a sender or receiver of the corresponding non-blocked message.
 
-Blocked images must not have a stored image URL. Whether a metadata-only blocked-message row is retained is still a team decision. Blocked content must not be socket-delivered.
+Blocked image bytes must not be stored, and the message row must not have an image URL. The Chat Service retains a metadata-only row for audit purposes, including the declared MIME type and moderation decision. Blocked content must not be socket-delivered.
 
 ## Send request through the API Gateway
 
@@ -30,7 +30,7 @@ The Gateway continues to accept and forward JSON. Image sends use this shape at 
 
 `content` may be omitted or null for an image-only message. The authenticated user identity continues to come from the Gateway's `x-user-id` header. Chat Service is responsible for calling the moderation service before persistence or delivery; the frontend must not call the Moderation Service directly.
 
-For allowed/warned images, Chat Service stores the image outside PostgreSQL, then persists its URL, MIME type, optional caption, decision and confidence score. Chat history and Socket.IO payloads return the same message fields, including the retrievable `image_url`. Blocked images are not stored or socket-delivered and do not retain an image URL.
+For allowed/warned images, Chat Service stores the image bytes outside PostgreSQL, then persists its URL, MIME type, optional caption, decision and confidence score. Chat history and Socket.IO payloads return the same message fields, including the retrievable `image_url`. Blocked image bytes are not stored or socket-delivered; only their metadata is retained, with no image URL.
 
 ## Payload limits
 

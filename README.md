@@ -1,7 +1,8 @@
 # AI-Powered Content Moderation System for Real-Time Chat
 
 ## Overview
-This project uses a microservices architecture to moderate chat content in real time. The existing text moderation flow is being extended to support image moderation.
+This project uses a microservices architecture to moderate text and image
+content in real-time chat.
 
 ## Services
 - [API Gateway](api-gateway/README.md): authenticated request routing to backend services.
@@ -10,17 +11,18 @@ This project uses a microservices architecture to moderate chat content in real 
 - [Moderation Service](moderation-service/README.md): text and image moderation.
 - [Analytics Service](analytics-service/README.md): moderation and message analytics.
 
-## Image moderation (in progress)
+## Image moderation
 
 The moderation API provides text, image, and combined moderation endpoints.
 Image moderation combines an NSFW classifier with a locally trained YOLO
-weapon detector. The detector weights are not tracked in Git; without
+weapon detector. The Chat Service calls moderation before message delivery,
+stores allowed/warned images outside PostgreSQL, and serves them only to
+conversation participants. Blocked image bytes are not stored or delivered;
+their moderation metadata is retained for audit.
+The detector weights are not tracked in Git; without
 `models/weapons/best.pt` (or `WEAPON_MODEL_PATH`) image inference fails closed
 with HTTP 503.
 
-The Chat Service sends images for moderation, stores allowed/warned image bytes
-outside PostgreSQL, and returns them to conversation participants through an
-authenticated media endpoint. Blocked images are not stored or socket-delivered.
 See the [image integration contract](docs/image-integration.md) for the message
 fields, request format, payload limits, and storage details.
 
@@ -52,7 +54,8 @@ A project exploring automated moderation of text and images, with integration in
 - **Image moderation:** includes an NSFW image classifier.
 - **Weapon detection:** includes a YOLO11n-based detector.
 - **Combined decision logic:** brings the image moderation signals together for a moderation response.
-- **Chat integration:** the chat service is intended to call the moderation endpoint before delivering a message.
+- **Chat integration:** the Chat Service calls the Moderation Service before
+  delivering messages and fails closed when moderation fails.
 
 ## API surface
 
@@ -78,7 +81,9 @@ Check the service's current request/response schemas and environment setup befor
 
 This is a learning and integration project, not a claim of production-grade safety. Automated moderation can make mistakes, and model outputs should not be treated as definitive judgments. Before production use, evaluate false positives and false negatives on representative data, define human-review and appeal paths, protect uploaded content, and document model limitations.
 
-The chat-service documentation describes a mock moderation implementation in its current flow. Confirm that the chat controller is wired to the real moderation service before assuming that live messages are being checked by the model.
+The Chat Service is wired to the real Moderation Service and fails closed when
+moderation is unavailable or returns an invalid response. End-to-end image
+inference still requires the externally supplied weapon detector weights.
 
 ## Local setup
 
