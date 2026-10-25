@@ -3,21 +3,44 @@ import { io } from 'socket.io-client';
 import api from '../api';
 import { useAuth } from '../context/AuthContext';
 
-// REST and Socket.IO both enter through the gateway; it proxies websocket upgrades.
+// REST and Socket.IO both enter through the gateway (it proxies websocket upgrades).
 const SOCKET_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp'];
+
+// ── Image validation constants ──────────────────────────────────────────────
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
+const MAX_IMAGE_SIZE_MB = 10; // must match the backend's 10 MiB raw-image cap
+const MAX_IMAGE_BYTES = MAX_IMAGE_SIZE_MB * 1024 * 1024;
+
+// Images are served only to the sender/receiver and need the JWT, so a plain
+// <img src> cannot load them. Fetch with the token and show the result as a blob.
+function AuthImage({ src, style, alt }) {
+  const [url, setUrl] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let objectUrl = null;
+    let active = true;
+    api.get(src, { responseType: 'blob' })
+      .then((res) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(res.data);
+        setUrl(objectUrl);
+      })
+      .catch(() => { if (active) setFailed(true); });
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [src]);
+  if (failed) return <div style={{ fontSize: 12, opacity: 0.7, padding: 8 }}>Image unavailable</div>;
+  if (!url) return <div style={{ fontSize: 12, opacity: 0.7, padding: 8 }}>Loading image…</div>;
+  return <img src={url} alt={alt} style={style} />;
+}
 
 export default function Chat() {
   const { user, token, logout } = useAuth();
-  const userId = user?.userId;     // useAuth() returns { user: { userId, role } }
+  const userId = user?.userId;
 
   const [conversations, setConversations] = useState([]);
   const [activeUser, setActiveUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [content, setContent] = useState('');
-  const [selectedImage, setSelectedImage] = useState(null);
-  const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState(null);
 
   const [showSearch, setShowSearch] = useState(false);
@@ -25,10 +48,18 @@ export default function Chat() {
   const [searchResults, setSearchResults] = useState([]);
   const [onlineIds, setOnlineIds] = useState([]);
 
-  // NEW: theme + profile
-  const [theme, setTheme] = useState('dark');     // 'dark' | 'light'
+  const [theme, setTheme] = useState('dark');
   const [showProfile, setShowProfile] = useState(false);
-  const [revealed, setRevealed] = useState({});   // { [messageId]: true } — warned msgs the recipient chose to view
+  const [revealed, setRevealed] = useState({});
+
+  // ── Image-specific state ─────────────────────────────────────────────────
+  const [imageFile, setImageFile] = useState(null);       // raw File object
+  const [imagePreview, setImagePreview] = useState(null); // object URL for preview
+  const [imageBase64, setImageBase64] = useState(null);   // base64 string
+  const [imageMime, setImageMime] = useState(null);       // MIME type string
+  const [imageSending, setImageSending] = useState(false);// prevent double-sends
+  const [imageError, setImageError] = useState(null);     // validation / API errors
+  const fileInputRef = useRef(null);                      // hidden <input type="file">
 
   function revealMessage(id) {
     setRevealed((prev) => ({ ...prev, [id]: true }));
@@ -36,37 +67,28 @@ export default function Chat() {
 
   const socketRef = useRef(null);
   const bottomRef = useRef(null);
-  const imageInputRef = useRef(null);
 
-  // styles rebuild when theme changes
   const S = useMemo(() => makeStyles(theme), [theme]);
-
-  const fetchConversations = useCallback(async () => {
-    const res = await api.get('/chat/conversations');
-    return res.data.conversations || [];
-  }, []);
 
   const loadConversations = useCallback(async () => {
     try {
-      setConversations(await fetchConversations());
+      const res = await api.get('/chat/conversations');
+      setConversations(res.data.conversations || []);
     } catch (err) { console.error(err); }
-  }, [fetchConversations]);
+  }, []);
 
-  // ---------- socket ----------
+  // ── socket ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!userId || !token) return;
-    const socket = io(SOCKET_URL, {
-      transports: ['websocket'],
-      auth: { token },
-    });
+    // The server identifies us from the JWT in the handshake (no 'register' event).
+    const socket = io(SOCKET_URL, { transports: ['websocket'], auth: { token } });
     socketRef.current = socket;
 
+    socket.on('connect_error', () =>
+      setNotice('Real-time connection unavailable. History and sending still work.'));
     socket.on('presence', (ids) => setOnlineIds(ids.map(String)));
-    socket.on('connect_error', () => setNotice('Real-time connection unavailable. Chat history and sending still work.'));
 
     socket.on('new_message', (msg) => {
-      // Ignore our OWN messages coming back over the socket —
-      // we already added them locally when we sent them.
       if (String(msg.sender_id) === String(userId)) {
         loadConversations();
         return;
@@ -74,7 +96,6 @@ export default function Chat() {
       setActiveUser((current) => {
         const other = String(msg.sender_id);
         if (current && String(current.id) === other) {
-          // Dedupe: only add if this message id isn't already shown.
           setMessages((prev) =>
             prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]
           );
@@ -85,22 +106,16 @@ export default function Chat() {
     });
 
     return () => socket.disconnect();
-  }, [userId, token, loadConversations]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, token]);
 
-  useEffect(() => {
-    let active = true;
-    fetchConversations()
-      .then((items) => {
-        if (active) setConversations(items);
-      })
-      .catch((err) => console.error(err));
-    return () => { active = false; };
-  }, [fetchConversations]);
+  useEffect(() => { loadConversations(); }, [loadConversations]);
 
   async function openConversation(u) {
     setActiveUser(u);
     setNotice(null);
     setShowSearch(false);
+    clearImage();
     try {
       const res = await api.get(`/chat/conversation/${u.id}`);
       setMessages(res.data.messages || []);
@@ -111,54 +126,116 @@ export default function Chat() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  function handleImageSelect(event) {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    if (!IMAGE_TYPES.includes(file.type)) {
-      setNotice('Choose a JPEG, PNG, WebP, GIF, or BMP image.');
-      return;
+  // Moderation outages now fail closed: nothing is delivered, backend answers 503/504.
+  function sendErrorText(err, what) {
+    const status = err?.response?.status;
+    if (status === 503 || status === 504) {
+      return `Your ${what} could not be checked by moderation, so it was not sent. Please try again.`;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
-      setNotice('Images must be 10 MiB or smaller.');
-      return;
-    }
-    setNotice(null);
-    setSelectedImage(file);
+    return err?.response?.data?.error || `Could not send ${what}. Try again.`;
   }
 
+  // ── text send ─────────────────────────────────────────────────
   async function handleSend() {
+    if (!content.trim() || !activeUser) return;
     const text = content.trim();
-    if ((!text && !selectedImage) || !activeUser || sending) return;
+    setContent('');
     setNotice(null);
-    setSending(true);
     try {
-      const payload = { receiver_id: activeUser.id };
-      if (text) payload.content = text;
-      if (selectedImage) {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error('Could not read the selected image'));
-          reader.readAsDataURL(selectedImage);
-        });
-        payload.image_base64 = dataUrl.split(',')[1];
-        payload.mime_type = selectedImage.type;
-      }
-
-      const res = await api.post('/chat/send', payload);
+      const res = await api.post('/chat/send', { receiver_id: activeUser.id, content: text });
       const { decision, message } = res.data;
       if (decision === 'block') setNotice('Your message was blocked and not delivered.');
-      else if (decision === 'warn') setNotice('Sent — flagged for review.');
+      else if (decision === 'warn') setNotice('Sent — the recipient will see a warning first.');
       setMessages((prev) => [...prev, message]);
+      loadConversations();
+    } catch (err) { console.error(err); setNotice(sendErrorText(err, 'message')); }
+  }
+
+  // ── image selection + validation ──────────────────────────────────────────
+  function handleImageSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';           // reset so same file can be re-selected
+    setImageError(null);
+
+    // type validation
+    if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+      setImageError('Only JPEG, PNG, GIF, WebP and BMP images are supported.');
+      return;
+    }
+    // size validation
+    if (file.size > MAX_IMAGE_BYTES) {
+      setImageError(`Image must be ${MAX_IMAGE_SIZE_MB} MB or smaller.`);
+      return;
+    }
+
+    // generate object URL for preview
+    const preview = URL.createObjectURL(file);
+
+    // convert to base64 via FileReader
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      // ev.target.result is "data:<mime>;base64,<data>"
+      // We store only the raw base64 part (after the comma)
+      const full = ev.target.result;
+      const base64 = full.split(',')[1];
+      setImageFile(file);
+      setImagePreview(preview);
+      setImageBase64(base64);
+      setImageMime(file.type);
+    };
+    reader.onerror = () => setImageError('Could not read the image file.');
+    reader.readAsDataURL(file);
+  }
+
+  function clearImage() {
+    if (imagePreview) URL.revokeObjectURL(imagePreview); // free memory
+    setImageFile(null);
+    setImagePreview(null);
+    setImageBase64(null);
+    setImageMime(null);
+    setImageError(null);
+  }
+
+  // ── image send ────────────────────────────────────────────────────────────
+  // POST /chat/send with JSON { receiver_id, image_base64, mime_type, content? }
+  // (same endpoint as text; the chat service moderates, stores, and pushes it).
+  async function handleSendImage() {
+    if (!imageBase64 || !activeUser || imageSending) return;
+    setImageSending(true);
+    setNotice(null);
+    setImageError(null);
+
+    const payload = {
+      receiver_id: activeUser.id,
+      image_base64: imageBase64,
+      mime_type: imageMime,
+    };
+    if (content.trim()) payload.content = content.trim(); // optional caption
+
+    try {
+      const res = await api.post('/chat/send', payload);
+      const { decision, message } = res.data;
+
+      if (decision === 'block') {
+        setNotice('Your image was blocked by content moderation and not delivered.');
+      } else if (decision === 'warn') {
+        setNotice('Image sent — the recipient will see a warning first.');
+      }
+      if (message) setMessages((prev) => [...prev, message]);
+
       setContent('');
-      setSelectedImage(null);
+      clearImage();
       loadConversations();
     } catch (err) {
-      console.error(err);
-      setNotice(err.response?.data?.error || 'Could not send. Try again.');
+      console.error('send image error:', err);
+      if (err?.response?.status === 413) {
+        setImageError('Image is too large for the server. Try a smaller file.');
+      } else {
+        setImageError(sendErrorText(err, 'image'));
+      }
     } finally {
-      setSending(false);
+      setImageSending(false);
     }
   }
 
@@ -180,10 +257,97 @@ export default function Chat() {
     return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  // ── render a single message bubble ───────────────────────────────────────
+  function renderBubble(m) {
+    const mine = String(m.sender_id) === String(userId);
+    const isImage = m.message_type === 'image';
+
+    // ── image message ──
+    if (isImage) {
+      const gated = m.decision === 'warn' && !mine && !revealed[m.id];
+
+      if (gated) {
+        return (
+          <div style={{ ...S.bubble, ...S.warnGate }}>
+            <div style={S.warnGateTitle}>⚠ This image was flagged as potentially harmful.</div>
+            <button style={S.showBtn} onClick={() => revealMessage(m.id)}>Show image</button>
+            <div style={S.warnGateTime}>{timeOf(m.created_at)}</div>
+          </div>
+        );
+      }
+
+      // blocked image — no image data to show, show placeholder instead
+      if (m.decision === 'block') {
+        return (
+          <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs) }}>
+            <div style={S.imgBlockedPlaceholder}>
+              <span style={{ fontSize: 22 }}>🚫</span>
+              <span style={{ fontSize: 12, opacity: 0.8 }}>
+                {mine ? 'Image blocked by content moderation' : 'Image not delivered'}
+              </span>
+            </div>
+            <div style={S.bubbleMeta}>
+              <span>{timeOf(m.created_at)}</span>
+              {mine && <span style={S.blockTag}>blocked</span>}
+            </div>
+          </div>
+        );
+      }
+
+      // allowed / warned-but-revealed image (fetched with the JWT; only mounted now,
+      // so a warned image is never downloaded before the recipient clicks "Show image")
+      return (
+        <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs), padding: 6 }}>
+          {m.image_url
+            ? <AuthImage src={m.image_url} alt="shared image" style={S.imgBubble} />
+            : <div style={S.imgBlockedPlaceholder}><span style={{ fontSize: 12, opacity: 0.7 }}>Image unavailable</span></div>
+          }
+          {m.content && <div style={{ padding: '6px 8px 0' }}>{m.content}</div>}
+          <div style={{ ...S.bubbleMeta, padding: '0 8px 2px' }}>
+            <span>{timeOf(m.created_at)}</span>
+            {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
+          </div>
+        </div>
+      );
+    }
+
+    // ── text message (existing logic, unchanged) ──
+    const gated = m.decision === 'warn' && !mine && !revealed[m.id];
+
+    if (gated) {
+      return (
+        <div style={{ ...S.bubble, ...S.warnGate }}>
+          <div style={S.warnGateTitle}>⚠ This message was flagged as potentially harmful.</div>
+          <button style={S.showBtn} onClick={() => revealMessage(m.id)}>Show message</button>
+          <div style={S.warnGateTime}>{timeOf(m.created_at)}</div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs) }}>
+        <div>{m.content}</div>
+        <div style={S.bubbleMeta}>
+          <span>{timeOf(m.created_at)}</span>
+          {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
+          {m.decision === 'block' && mine && <span style={S.blockTag}>🚫 blocked</span>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={S.app}>
-      {/* keyframes for fade-in + hover (injected once) */}
       <style>{CSS_ANIM}</style>
+
+      {/* hidden file input — triggered by the 📎 button */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={ALLOWED_IMAGE_TYPES.join(',')}
+        style={{ display: 'none' }}
+        onChange={handleImageSelect}
+      />
 
       {/* ---------------- Sidebar ---------------- */}
       <aside style={S.sidebar}>
@@ -249,7 +413,11 @@ export default function Chat() {
                   </div>
                   <div style={S.convPreview}>
                     {String(c.last_sender) === String(userId) ? 'You: ' : ''}
-                    {c.last_decision === 'block' ? '(blocked message)' : c.last_message}
+                    {c.last_decision === 'block'
+                      ? '(blocked message)'
+                      : (c.last_message_type === 'image' || c.last_message === '[image]')
+                        ? '📷 Image'
+                        : c.last_message}
                   </div>
                 </div>
               </div>
@@ -281,65 +449,65 @@ export default function Chat() {
               {messages.length === 0 && <div style={S.emptyChat}>No messages yet. Say hi 👋</div>}
               {messages.map((m) => {
                 const mine = String(m.sender_id) === String(userId);
-                // A warned message is hidden from the RECIPIENT until they choose
-                // to view it. The sender always sees their own message.
-                const gated = m.decision === 'warn' && !mine && !revealed[m.id];
-
                 return (
                   <div key={m.id} className="msg-in"
                        style={{ ...S.row, justifyContent: mine ? 'flex-end' : 'flex-start' }}>
-                    {gated ? (
-                      <div style={{ ...S.bubble, ...S.warnGate }}>
-                        <div style={S.warnGateTitle}>⚠ This message was flagged as potentially harmful.</div>
-                        <button style={S.showBtn} onClick={() => revealMessage(m.id)}>Show message</button>
-                        <div style={S.warnGateTime}>{timeOf(m.created_at)}</div>
-                      </div>
-                    ) : (
-                      <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs) }}>
-                        {m.image_url && <AuthenticatedImage imageUrl={m.image_url} />}
-                        {m.content && <div>{m.content}</div>}
-                        <div style={S.bubbleMeta}>
-                          <span>{timeOf(m.created_at)}</span>
-                          {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
-                          {m.decision === 'block' && mine && <span style={S.blockTag}>🚫 blocked</span>}
-                        </div>
-                      </div>
-                    )}
+                    {renderBubble(m)}
                   </div>
                 );
               })}
               <div ref={bottomRef} />
             </div>
 
+            {/* notices */}
             {notice && <div style={S.notice}>{notice}</div>}
+            {imageError && <div style={{ ...S.notice, background: '#3d1a1a', color: '#f87171' }}>{imageError}</div>}
 
+            {/* image preview strip — shown only when an image is selected */}
+            {imagePreview && (
+              <div style={S.imgPreviewBar}>
+                <img src={imagePreview} alt="preview" style={S.imgPreviewThumb} />
+                <div style={{ flex: 1, fontSize: 12, color: '#B0B0B0' }}>
+                  <div style={{ fontWeight: 600 }}>{imageFile?.name}</div>
+                  <div>{(imageFile?.size / 1024).toFixed(1)} KB — ready to send</div>
+                </div>
+                <button style={S.imgCancelBtn} onClick={clearImage} title="Remove image">✕</button>
+              </div>
+            )}
+
+            {/* input bar */}
             <div style={S.inputBar}>
-              <input
-                ref={imageInputRef}
-                type="file"
-                accept={IMAGE_TYPES.join(',')}
-                onChange={handleImageSelect}
-                style={{ display: 'none' }}
-              />
+              {/* 📎 attachment button */}
               <button
                 style={S.attachBtn}
-                className="hoverable"
-                onClick={() => imageInputRef.current?.click()}
-                disabled={sending}
-                title="Attach an image"
-              >Image</button>
-              <input style={S.msgInput} placeholder="Type a message..." value={content}
-                     onChange={(e) => setContent(e.target.value)}
-                     onKeyDown={(e) => e.key === 'Enter' && handleSend()} />
-              {selectedImage && (
-                <span style={S.selectedImage} title={selectedImage.name}>
-                  {selectedImage.name}
-                  <button style={S.removeImageBtn} onClick={() => setSelectedImage(null)} aria-label="Remove image">×</button>
-                </span>
-              )}
-              <button style={S.sendBtn} className="hoverable" onClick={handleSend} disabled={sending}>
-                {sending ? 'Sending...' : 'Send'}
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach image"
+                disabled={imageSending}
+              >
+                📎
               </button>
+
+              <input
+                style={S.msgInput}
+                placeholder={imagePreview ? 'Add a caption (optional)…' : 'Type a message...'}
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (imagePreview ? handleSendImage() : handleSend())}
+              />
+
+              {/* Send button — switches between text and image send */}
+              {imagePreview ? (
+                <button
+                  style={{ ...S.sendBtn, opacity: imageSending ? 0.6 : 1 }}
+                  className="hoverable"
+                  onClick={handleSendImage}
+                  disabled={imageSending}
+                >
+                  {imageSending ? '…' : 'Send'}
+                </button>
+              ) : (
+                <button style={S.sendBtn} className="hoverable" onClick={handleSend}>Send</button>
+              )}
             </div>
           </>
         )}
@@ -361,33 +529,6 @@ export default function Chat() {
   );
 }
 
-function AuthenticatedImage({ imageUrl }) {
-  const [source, setSource] = useState('');
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    let objectUrl;
-    api.get(imageUrl, { responseType: 'blob' })
-      .then((response) => {
-        if (!active) return;
-        objectUrl = URL.createObjectURL(response.data);
-        setSource(objectUrl);
-      })
-      .catch(() => {
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [imageUrl]);
-
-  if (failed) return <div role="img" aria-label="Image unavailable">Image unavailable</div>;
-  if (!source) return <div>Loading image...</div>;
-  return <img src={source} alt="Moderated chat attachment" style={{ maxWidth: '100%', maxHeight: 280, borderRadius: 10 }} />;
-}
-
 const CSS_ANIM = `
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .msg-in { animation: fadeUp 0.18s ease-out; }
@@ -395,7 +536,6 @@ const CSS_ANIM = `
 .hoverable:hover { filter: brightness(1.12); }
 `;
 
-// ---------------- theme-aware styles ----------------
 function makeStyles(theme) {
   const dark = {
     bg: '#121212', sidebar: '#1B1B1B', card: '#242424', accent: '#B794F4',
@@ -408,7 +548,7 @@ function makeStyles(theme) {
     mine: '#7C5CBF', theirs: '#FFFFFF', avatarBg: '#D8CCEC', modalBg: '#FFFFFF',
   };
   const C = theme === 'dark' ? dark : light;
-  const WARN = '#C05600'; // amber for warning gate
+  const WARN = '#C05600';
 
   return {
     app: { display: 'flex', height: '100vh', width: '100vw', position: 'fixed', top: 0, left: 0,
@@ -482,18 +622,31 @@ function makeStyles(theme) {
     notice: { margin: '0 24px 8px', padding: '8px 12px', background: C.accentDim, color: C.accent,
       borderRadius: 10, fontSize: 13 },
 
-    inputBar: { display: 'flex', gap: 10, padding: 16, borderTop: `1px solid ${C.border}`, background: C.sidebar },
+    // ── image-specific styles ──
+    imgPreviewBar: { display: 'flex', alignItems: 'center', gap: 12, margin: '0 16px 8px',
+      padding: '10px 12px', borderRadius: 10, background: C.card,
+      border: `1px solid ${C.border}` },
+    imgPreviewThumb: { width: 56, height: 56, borderRadius: 8, objectFit: 'cover', flexShrink: 0 },
+    imgCancelBtn: { width: 28, height: 28, borderRadius: '50%', border: 'none',
+      background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 14,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+
+    imgBubble: { maxWidth: '100%', maxHeight: 280, borderRadius: 10, display: 'block',
+      objectFit: 'contain' },
+    imgBlockedPlaceholder: { display: 'flex', flexDirection: 'column', alignItems: 'center',
+      gap: 6, padding: '12px 8px', opacity: 0.7 },
+
+    inputBar: { display: 'flex', gap: 8, padding: 16, borderTop: `1px solid ${C.border}`,
+      background: C.sidebar, alignItems: 'center' },
+    attachBtn: { width: 38, height: 38, borderRadius: '50%', border: 'none', background: C.card,
+      color: C.text, fontSize: 18, cursor: 'pointer', flexShrink: 0,
+      display: 'flex', alignItems: 'center', justifyContent: 'center' },
     msgInput: { flex: 1, padding: '12px 16px', borderRadius: 24, border: `1px solid ${C.border}`,
       background: C.card, color: C.text, fontSize: 14, outline: 'none' },
-    attachBtn: { padding: '10px 14px', borderRadius: 20, border: `1px solid ${C.border}`,
-      background: C.card, color: C.text, fontWeight: 600, cursor: 'pointer' },
-    selectedImage: { maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      fontSize: 12, color: C.textDim },
-    removeImageBtn: { marginLeft: 5, border: 'none', background: 'transparent', color: C.text, cursor: 'pointer' },
     sendBtn: { padding: '12px 24px', borderRadius: 24, border: 'none', background: C.accent,
-      color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer' },
+      color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer', flexShrink: 0 },
 
-    // profile modal
+    // profile modal (unchanged)
     modalOverlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex',
       alignItems: 'center', justifyContent: 'center', zIndex: 50 },
     modal: { background: C.modalBg, color: C.text, borderRadius: 16, padding: 28, width: 320,
