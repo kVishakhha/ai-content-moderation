@@ -6,6 +6,7 @@ from typing import Dict
 
 from PIL import Image, UnidentifiedImageError
 from .weapon_moderator import WeaponModelError, moderate_weapons
+from .gore_moderator import GoreModelError, moderate_gore
 from .combined_image_decision_engine import decide_combined_image
 
 log = logging.getLogger("moderation.image")
@@ -62,8 +63,7 @@ def _decode_image(image_bytes: bytes) -> Image.Image:
 def moderate_image_bytes(image_bytes: bytes) -> Dict[str, object]:
     """Validate and classify bytes; fail closed by raising on any failure.
 
-    NSFW and weapons are evaluated independently; the NSFW classifier does not
-    detect weapons.
+    NSFW, weapons, and gore are evaluated by separate classifiers.
     """
     image = _decode_image(image_bytes)
     try:
@@ -73,11 +73,12 @@ def moderate_image_bytes(image_bytes: bytes) -> Dict[str, object]:
             raise ValueError("Model output did not include normal and nsfw labels")
         score = scores["nsfw"]
         weapons = moderate_weapons(image_bytes)
-        decision, combined_score = decide_combined_image(score, weapons)
+        gore = moderate_gore(image)
+        decision, combined_score = decide_combined_image(score, weapons, gore)
         return {
             "score": round(combined_score, 4),
             "decision": decision,
-            "categories": {"normal": round(scores["normal"], 4), "nsfw": round(score, 4), "weapons": {
+            "categories": {"normal": round(scores["normal"], 4), "nsfw": round(score, 4), "gore": gore, "weapons": {
                 "detected": weapons["detected"], "detections": [
                     {"label": d["label"], "confidence": round(d["confidence"], 4)} for d in weapons["detections"]
                 ]
@@ -86,6 +87,9 @@ def moderate_image_bytes(image_bytes: bytes) -> Dict[str, object]:
     except WeaponModelError:
         # Preserve the distinct configuration/inference error for the endpoint.
         raise
+    except GoreModelError as exc:
+        log.exception("Gore moderation model failed")
+        raise ImageModelError("Gore moderation model is unavailable") from exc
     except Exception as exc:
         log.exception("Image moderation inference failed")
         raise ImageModelError("Image moderation inference failed") from exc

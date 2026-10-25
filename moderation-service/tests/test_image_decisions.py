@@ -17,21 +17,39 @@ def png_bytes():
 
 
 class ImageDecisionTests(unittest.TestCase):
-    def run_moderation(self, nsfw=0.02, detections=None):
+    def run_moderation(self, nsfw=0.02, detections=None, gore_confidence=0.02):
         detections = detections or []
         classifier = lambda image: [
             {"label": "normal", "score": 1 - nsfw}, {"label": "nsfw", "score": nsfw}
         ]
         weapons = {"detected": bool(detections), "detections": detections}
+        gore = {"detected": gore_confidence >= 0.50, "confidence": gore_confidence, "category": "gore"}
         with patch("app.image_moderator._get_classifier", return_value=classifier), \
-             patch("app.image_moderator.moderate_weapons", return_value=weapons):
+             patch("app.image_moderator.moderate_weapons", return_value=weapons), \
+             patch("app.image_moderator.moderate_gore", return_value=gore):
             return moderate_image_bytes(png_bytes())
 
     def test_safe_synthetic_image_mocks_both_models(self):
         result = self.run_moderation()
         self.assertEqual(result["decision"], "allow")
-        self.assertEqual(set(result["categories"]), {"normal", "nsfw", "weapons"})
+        self.assertEqual(set(result["categories"]), {"normal", "nsfw", "gore", "weapons"})
         self.assertFalse(result["categories"]["weapons"]["detected"])
+        self.assertFalse(result["categories"]["gore"]["detected"])
+
+    def test_gore_warning_threshold(self):
+        self.assertEqual(self.run_moderation(gore_confidence=0.50)["decision"], "warn")
+
+    def test_gore_block_threshold(self):
+        self.assertEqual(self.run_moderation(gore_confidence=0.90)["decision"], "block")
+
+    def test_gore_model_failure_fails_closed(self):
+        from app.gore_moderator import GoreModelError
+        with patch("app.image_moderator._get_classifier", return_value=lambda image: [
+            {"label": "normal", "score": .99}, {"label": "nsfw", "score": .01}
+        ]), patch("app.image_moderator.moderate_weapons", return_value={"detected": False, "detections": []}), \
+             patch("app.image_moderator.moderate_gore", side_effect=GoreModelError("offline")):
+            with self.assertRaises(ImageModelError):
+                moderate_image_bytes(png_bytes())
 
     def test_no_weapon_detection(self):
         self.assertEqual(self.run_moderation()["decision"], "allow")

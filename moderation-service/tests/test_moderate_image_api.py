@@ -8,6 +8,7 @@ from PIL import Image
 
 from app.main import app
 from app.weapon_moderator import WeaponModelError
+from app.gore_moderator import GoreModelError
 
 
 def png_bytes():
@@ -20,6 +21,11 @@ class ModerateImageIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         self.payload = {"image_base64": base64.b64encode(png_bytes()).decode(), "mime_type": "image/png"}
+        patcher = patch("app.image_moderator.moderate_gore", return_value={
+            "detected": False, "confidence": 0.02, "category": "gore"
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_valid_image_and_both_mocked_models_returns_200(self):
         with patch("app.image_moderator._get_classifier", return_value=lambda image: [
@@ -48,6 +54,14 @@ class ModerateImageIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("Weapon moderation is unavailable", response.json()["detail"])
         self.assertIn("WEAPON_MODEL_PATH", response.json()["detail"])
+
+    def test_gore_model_unavailable_returns_503(self):
+        with patch("app.image_moderator._get_classifier", return_value=lambda image: [
+            {"label": "normal", "score": .99}, {"label": "nsfw", "score": .01}
+        ]), patch("app.image_moderator.moderate_weapons", return_value={"detected": False, "detections": []}), \
+             patch("app.image_moderator.moderate_gore", side_effect=GoreModelError("offline")):
+            response = self.client.post("/moderate-image", json=self.payload)
+        self.assertEqual(response.status_code, 503)
 
     def test_invalid_base64_returns_400(self):
         response = self.client.post("/moderate-image", json={"image_base64": "%%%", "mime_type": "image/png"})

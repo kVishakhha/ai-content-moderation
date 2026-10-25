@@ -4,6 +4,7 @@ pydantic
 detoxify
 torch
 transformers
+timm
 Pillow
 ultralytics
 PyYAML
