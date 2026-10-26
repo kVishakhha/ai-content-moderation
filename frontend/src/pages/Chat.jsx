@@ -51,6 +51,7 @@ export default function Chat() {
   const [theme, setTheme] = useState('dark');
   const [showProfile, setShowProfile] = useState(false);
   const [revealed, setRevealed] = useState({});
+  const [menuId, setMenuId] = useState(null);
 
   // ── Image-specific state ─────────────────────────────────────────────────
   const [imageFile, setImageFile] = useState(null);       // raw File object
@@ -63,6 +64,23 @@ export default function Chat() {
 
   function revealMessage(id) {
     setRevealed((prev) => ({ ...prev, [id]: true }));
+  }
+
+  async function deleteMessage(m, scope) {
+    setMenuId(null);
+    try {
+      await api.delete(`/chat/message/${m.id}`, { params: { scope } });
+      if (scope === 'everyone') {
+        setMessages((prev) => prev.map((x) => (x.id === m.id
+          ? { ...x, deleted_for_everyone: true, content: null, image_url: null, message_type: 'text' }
+          : x)));
+      } else {
+        setMessages((prev) => prev.filter((x) => x.id !== m.id));
+      }
+      loadConversations();
+    } catch (err) {
+      setNotice(err.response?.data?.error || 'Could not delete the message.');
+    }
   }
 
   const socketRef = useRef(null);
@@ -87,6 +105,12 @@ export default function Chat() {
     socket.on('connect_error', () =>
       setNotice('Real-time connection unavailable. History and sending still work.'));
     socket.on('presence', (ids) => setOnlineIds(ids.map(String)));
+        socket.on('message_deleted', ({ id }) => {
+      setMessages((prev) => prev.map((m) => (m.id === id
+        ? { ...m, deleted_for_everyone: true, content: null, image_url: null, message_type: 'text' }
+        : m)));
+      loadConversations();
+    });
 
     socket.on('new_message', (msg) => {
       if (String(msg.sender_id) === String(userId)) {
@@ -262,6 +286,16 @@ export default function Chat() {
     const mine = String(m.sender_id) === String(userId);
     const isImage = m.message_type === 'image';
 
+    
+    if (m.deleted_for_everyone) {
+      return (
+        <div style={{ ...S.bubble, ...(mine ? S.bubbleMine : S.bubbleTheirs), opacity: 0.6, fontStyle: 'italic' }}>
+          🚫 This message was deleted
+          <div style={S.bubbleMeta}><span>{timeOf(m.created_at)}</span></div>
+        </div>
+      );
+    }
+
     // ── image message ──
     if (isImage) {
       const gated = m.decision === 'warn' && !mine && !revealed[m.id];
@@ -332,6 +366,30 @@ export default function Chat() {
           {m.decision === 'warn' && <span style={S.warnTag}>⚠ flagged</span>}
           {m.decision === 'block' && mine && <span style={S.blockTag}>🚫 blocked</span>}
         </div>
+      </div>
+    );
+  }
+
+  function renderMenu(m) {
+    const mine = String(m.sender_id) === String(userId);
+    const item = { padding: '6px 10px', cursor: 'pointer' };
+    return (
+      <div style={{ position: 'relative' }}>
+        <button
+          onClick={() => setMenuId(menuId === m.id ? null : m.id)}
+          title="Delete options"
+          style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: 18, opacity: 0.6, color: 'inherit' }}
+        >⋯</button>
+        {menuId === m.id && (
+          <div style={{ position: 'absolute', zIndex: 10, top: '100%', [mine ? 'right' : 'left']: 0,
+                        background: '#222', color: '#fff', border: '1px solid #444', borderRadius: 8,
+                        padding: 4, whiteSpace: 'nowrap', fontSize: 13 }}>
+            <div style={item} onClick={() => deleteMessage(m, 'me')}>Delete for me</div>
+            {mine && !m.deleted_for_everyone && (
+              <div style={item} onClick={() => deleteMessage(m, 'everyone')}>Unsend for everyone</div>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -451,8 +509,10 @@ export default function Chat() {
                 const mine = String(m.sender_id) === String(userId);
                 return (
                   <div key={m.id} className="msg-in"
-                       style={{ ...S.row, justifyContent: mine ? 'flex-end' : 'flex-start' }}>
+                       style={{ ...S.row, justifyContent: mine ? 'flex-end' : 'flex-start', alignItems: 'center', gap: 4 }}>
+                    {mine && renderMenu(m)}
                     {renderBubble(m)}
+                    {!mine && renderMenu(m)}
                   </div>
                 );
               })}
