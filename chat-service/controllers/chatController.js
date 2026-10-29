@@ -247,6 +247,7 @@ async function getImage(req, res) {
       `SELECT mime_type FROM messages
        WHERE image_url = $1
          AND decision <> 'block'
+         AND deleted_for_everyone = FALSE
          AND (sender_id = $2 OR receiver_id = $2 OR $3 = 'admin')
        LIMIT 1`,
       [imageUrl, userId, userRole]
@@ -282,10 +283,16 @@ async function getConversation(req, res) {
       [userId, otherUserId]
     );
 
-    const visible = result.rows.filter((m) => {
-      if (m.decision !== 'block') return true;
-      return String(m.sender_id) === String(userId);
-    });
+      const visible = result.rows
+      .filter((m) => {
+        const isSender = String(m.sender_id) === String(userId);
+        if (isSender ? m.deleted_by_sender : m.deleted_by_receiver) return false;
+        if (m.decision !== 'block') return true;
+        return isSender;
+      })
+      .map((m) => (m.deleted_for_everyone
+        ? { ...m, content: null, image_url: null, mime_type: null, message_type: 'text' }
+        : m));
 
     return res.json({ messages: visible });
   } catch (err) {
@@ -305,16 +312,19 @@ async function getConversationList(req, res) {
       WITH convo AS (
         SELECT
           CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END AS other_id,
-          content, message_type, decision, sender_id, created_at,
+                    content, message_type, decision, sender_id, created_at, deleted_for_everyone,
           ROW_NUMBER() OVER (
             PARTITION BY CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END
             ORDER BY created_at DESC
           ) AS rn
         FROM messages
-        WHERE sender_id = $1 OR receiver_id = $1
+            WHERE (sender_id = $1 AND NOT deleted_by_sender)
+            OR (receiver_id = $1 AND NOT deleted_by_receiver)
       )
       SELECT c.other_id, u.username,
-             CASE WHEN c.message_type = 'image' THEN '[image]' ELSE c.content END AS last_message,
+                CASE WHEN c.deleted_for_everyone THEN 'This message was deleted'
+                  WHEN c.message_type = 'image' THEN '[image]'
+                  ELSE c.content END AS last_message,
              c.decision AS last_decision, c.sender_id AS last_sender, c.created_at
       FROM convo c
       JOIN users u ON u.id = c.other_id
@@ -356,10 +366,57 @@ async function searchUsers(req, res) {
   }
 }
 
+// DELETE /chat/message/:id?scope=me|everyone
+async function deleteMessage(req, res) {
+  try {
+    const userId = req.headers['x-user-id'];
+    if (!userId) return res.status(401).json({ error: 'No user id from gateway' });
+
+    const messageId = Number(req.params.id);
+    const scope = req.query.scope === 'everyone' ? 'everyone' : 'me';
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      return res.status(400).json({ error: 'Invalid message id' });
+    }
+
+    const found = await pool.query(
+      `SELECT id, sender_id, receiver_id FROM messages
+       WHERE id = $1 AND (sender_id = $2 OR receiver_id = $2)`,
+      [messageId, userId]
+    );
+    if (found.rows.length === 0) return res.status(404).json({ error: 'Message not found' });
+
+    const msg = found.rows[0];
+    const isSender = String(msg.sender_id) === String(userId);
+
+    if (scope === 'everyone') {
+      if (!isSender) {
+        return res.status(403).json({ error: 'Only the sender can unsend a message' });
+      }
+      await pool.query('UPDATE messages SET deleted_for_everyone = TRUE WHERE id = $1', [messageId]);
+
+      const io = getIO(req);
+      const online = getOnlineUsers(req);
+      if (io && online) {
+        const receiverSocket = online.get(String(msg.receiver_id));
+        if (receiverSocket) io.to(receiverSocket).emit('message_deleted', { id: msg.id, scope: 'everyone' });
+      }
+    } else {
+      const column = isSender ? 'deleted_by_sender' : 'deleted_by_receiver';
+      await pool.query(`UPDATE messages SET ${column} = TRUE WHERE id = $1`, [messageId]);
+    }
+
+    return res.json({ id: messageId, scope });
+  } catch (err) {
+    console.error('deleteMessage error:', err);
+    return res.status(500).json({ error: 'Could not delete the message' });
+  }
+}
+
 module.exports = {
   sendMessage,
   getImage,
   getConversation,
   getConversationList,
   searchUsers,
+  deleteMessage,
 };

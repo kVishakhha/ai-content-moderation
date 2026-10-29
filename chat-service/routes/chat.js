@@ -6,6 +6,7 @@ const {
   getConversation,
   getConversationList,
   searchUsers,
+  deleteMessage,
 } = require('../controllers/chatController');
 
 // send a message (gets moderated, then pushed live if allowed)
@@ -21,5 +22,7 @@ router.get('/users/search', searchUsers);
 
 // full message history with one person
 router.get('/conversation/:otherUserId', getConversation);
+
+router.delete('/message/:id', deleteMessage);
 
 module.exports = router;
