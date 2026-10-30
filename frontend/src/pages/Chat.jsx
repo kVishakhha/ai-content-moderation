@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { io } from 'socket.io-client';
-import api from '../api';
+import api, { API_BASE_URL } from '../api';
 import { useAuth } from '../context/AuthContext';
 
 // REST and Socket.IO both enter through the gateway (it proxies websocket upgrades).
-const SOCKET_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
+const SOCKET_URL = API_BASE_URL;
 
 // ── Image validation constants ──────────────────────────────────────────────
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];

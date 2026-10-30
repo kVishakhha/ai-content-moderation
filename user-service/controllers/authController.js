@@ -96,6 +96,13 @@ const login = async (req, res) => {
       });
     }
 
+    if (!process.env.JWT_SECRET) {
+      console.error('Login unavailable: JWT_SECRET is not configured');
+      return res.status(503).json({
+        error: 'Authentication is not configured'
+      });
+    }
+
     const cleanEmail = email.trim().toLowerCase();
 
     const result = await pool.query(
@@ -122,13 +129,6 @@ const login = async (req, res) => {
     if (!passwordMatches) {
       return res.status(401).json({
         error: 'Invalid credentials'
-      });
-    }
-
-    if (!process.env.JWT_SECRET) {
-      console.error('Login error: JWT_SECRET is not configured');
-      return res.status(500).json({
-        error: 'Authentication is not configured'
       });
     }
 

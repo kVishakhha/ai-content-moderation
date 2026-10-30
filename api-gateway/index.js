@@ -9,7 +9,7 @@ const app = express();
 
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
-  : true;
+  : [];
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '15mb' }));
 
@@ -34,7 +34,13 @@ const verifyToken = (req, res, next) => {
 
   const token = authHeader.split(' ')[1];
   try {
+    if (!process.env.JWT_SECRET) {
+      return res.status(503).json({ error: 'Authentication is not configured' });
+    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (!decoded.userId || !['user', 'admin'].includes(decoded.role)) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
     req.headers['x-user-id'] = String(decoded.userId);
     req.headers['x-user-role'] = decoded.role;
     next();
@@ -77,8 +83,10 @@ const forward = (targetURL, prefix) => async (req, res) => {
     res.status(response.status).json(response.data);
   } catch (err) {
     if (err.response) {
+      console.warn(`Upstream request failed: ${req.method} ${req.path} (${err.response.status})`);
       res.status(err.response.status).json(err.response.data);
     } else {
+      console.error(`Upstream unavailable: ${req.method} ${req.path} (${err.code || err.name || 'unknown error'})`);
       res.status(503).json({ error: 'Service unavailable' });
     }
   }
@@ -102,16 +110,19 @@ app.use((err, req, res, next) => {
 });
 
 // Axios handles REST forwarding; Socket.IO requires a WebSocket-capable proxy.
-const socketProxy = createProxyMiddleware({
-  target: process.env.CHAT_SERVICE_URL || 'http://localhost:3002',
-  changeOrigin: true,
-  ws: true,
-  pathFilter: '/socket.io',
-});
-app.use(socketProxy);
-
+let socketProxy;
+if (process.env.CHAT_SERVICE_URL) {
+  socketProxy = createProxyMiddleware({
+    target: process.env.CHAT_SERVICE_URL,
+    changeOrigin: true,
+    ws: true,
+    pathFilter: '/socket.io',
+  });
+  app.use(socketProxy);
+}
 const PORT = process.env.GATEWAY_PORT || 3000;
 const server = app.listen(PORT, () => {
-  console.log(`API Gateway running on port ${PORT}`);
+  const socketStatus = socketProxy ? '' : '; CHAT_SERVICE_URL is not configured';
+  console.log(`API Gateway running on port ${PORT}${socketStatus}`);
 });
-server.on('upgrade', socketProxy.upgrade);
+if (socketProxy) server.on('upgrade', socketProxy.upgrade);

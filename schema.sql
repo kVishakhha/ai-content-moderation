@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS messages (
   mime_type VARCHAR(100),
   decision VARCHAR(10) DEFAULT 'pending',
   confidence_score FLOAT,
+  deleted_for_everyone BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_by_sender BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_by_receiver BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT messages_content_type_check CHECK (
     message_type IN ('text', 'image') AND

@@ -48,8 +48,9 @@ and warning review features are available at `/admin`.
    `JWT_SECRET`.
 2. Place weapon detector weights at `moderation-service/models/weapons/best.pt`
    if image inference should include weapon detections.
-3. Apply `migrations/001_add_image_support.sql` and
-   `migrations/002_add_review_queue_workflow.sql` to an existing database.
+3. Apply `migrations/001_add_image_support.sql`,
+   `migrations/002_add_review_queue_workflow.sql`, and
+   `migrations/003_add_message_deletion.sql` to an existing database.
    New databases initialize from `schema.sql` and do not need these migrations.
 4. To enable trained DistilBERT, place its saved Hugging Face model/tokenizer
    under `moderation-service/training/artifacts/distilbert` and set

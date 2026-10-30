@@ -16,9 +16,12 @@ psql -h <internal-host> -p <port> -U <user> -d <database> \
   -f migrations/001_add_image_support.sql
 psql -h <internal-host> -p <port> -U <user> -d <database> \
   -f migrations/002_add_review_queue_workflow.sql
+psql -h <internal-host> -p <port> -U <user> -d <database> \
+  -f migrations/003_add_message_deletion.sql
 ```
 
-For a new database, initialize with `schema.sql` instead. Use a database plan
+For a new database, initialize with `schema.sql` instead. It includes the
+message deletion columns used by the current Chat Service. Use a database plan
 with backups if the demo data must survive provider restarts; free database
 plans may have retention limits.
 
@@ -78,11 +81,13 @@ re-evaluated. Configure `DISTILBERT_WARN_THRESHOLD` and
 
 ## 3. Deploy the frontend on Vercel
 
-Import the repository into Vercel and set the project root to `frontend`.
-Configure this build-time environment variable:
+Import the repository into Vercel and set the project root to `frontend`, build
+command to `npm run build`, and output
+directory to `dist`. Configure this build-time environment variable in the
+Vercel Production environment, then redeploy after changing it:
 
 ```text
-VITE_API_BASE_URL=https://<public-gateway-host>
+VITE_API_BASE_URL=https://safesphere-api-gateway.onrender.com
 ```
 
 The included `frontend/vercel.json` rewrites client-side routes to `index.html`.
@@ -91,19 +96,34 @@ Set the gateway's `CORS_ORIGIN` to the exact deployed Vercel URL (including
 
 ## 4. Verify the deployment
 
-1. Check `https://<gateway-host>/health`.
-2. Register a normal account and log in; verify it routes to `/chat`.
-3. Log in with a pre-provisioned admin account; verify it routes to `/admin`.
-   Public registration does not allow clients to select an admin role.
-4. Send text through the chat UI and confirm the moderation decision and
-   delivery behavior.
-5. Send a safe image and confirm it persists and loads for conversation
-   participants. Confirm a warning appears in the admin review queue.
-6. Resolve a warning as confirmed and dismissed, and confirm counts update.
-7. Test a blocked image and confirm no image bytes are persisted or delivered.
-8. Only after model files are uploaded, exercise a weapon image and confirm
-   detector output. If testing DistilBERT, use the held-out test examples and
-   record results separately from the Detoxify baseline.
+Run with two disposable test accounts and test images; do not use real user
+accounts or messages.
+
+1. Open the Vercel URL and check browser developer tools for failed API calls,
+   CORS errors, or requests to `localhost`.
+2. Check `/health` on the public Gateway and each service's Render health URL.
+   A sleeping free instance may need time to cold-start; retry before treating a
+   timeout as a service failure.
+3. Register a test user. Repeat with the same username/email and confirm HTTP
+   409. Try an invalid password and confirm login is rejected; log in with the
+   valid credentials and confirm the UI opens `/chat`.
+4. Use the returned token with `GET /auth/me` and a protected chat request.
+   Confirm a request without a token is rejected. Public registration must not
+   let the caller choose an admin role.
+5. Log in with a pre-provisioned admin account and confirm `/analytics/summary`
+   and `/analytics/reviews` load. Resolve a test review and check the counts.
+6. Send text through Chat and check the moderation decision and delivery. Send
+   a safe image and confirm it loads for both conversation participants.
+7. Exercise `Delete for me` and `Unsend for everyone` with test messages; verify
+   the resulting history and real-time update on the other participant.
+8. Send a warning and blocked moderation example. Confirm warning review
+   behavior and that blocked content is not delivered. Test NSFW image
+   classification and weapon detection only with configured model weights.
+   Image inference should return HTTP 503 while the non-Git weapon weights are
+   missing; this is a model asset/deployment blocker, not a successful scan.
+9. Confirm Analytics reflects the test messages and review outcomes. Remove
+   test accounts only through an explicitly reviewed database procedure; do
+   not delete production users as part of smoke testing.
 
 The Postman collection at
 `postman/ai-content-moderation.postman_collection.json` covers gateway health,
